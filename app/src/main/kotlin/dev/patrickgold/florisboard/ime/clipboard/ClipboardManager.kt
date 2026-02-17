@@ -21,6 +21,7 @@ import android.content.Context
 import dev.patrickgold.florisboard.app.FlorisPreferenceStore
 import dev.patrickgold.florisboard.appContext
 import dev.patrickgold.florisboard.editorInstance
+import dev.patrickgold.florisboard.lanClipboardSyncManager
 import dev.patrickgold.florisboard.ime.clipboard.provider.ClipboardHistoryDao
 import dev.patrickgold.florisboard.ime.clipboard.provider.ClipboardHistoryDatabase
 import dev.patrickgold.florisboard.ime.clipboard.provider.ClipboardItem
@@ -91,6 +92,7 @@ class ClipboardManager(
     private val prefs by FlorisPreferenceStore
     private val appContext by context.appContext()
     private val editorInstance by context.editorInstance()
+    private val lanClipboardSyncManager by context.lanClipboardSyncManager()
     private val systemClipboardManager = context.systemService(AndroidClipboardManager::class)
 
     private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -207,6 +209,7 @@ class ClipboardManager(
                     val item = ClipboardItem.fromClipData(appContext, systemPrimaryClip, cloneUri = true)
                     primaryClip = item
                     insertOrMoveBeginning(item)
+                    lanClipboardSyncManager.submitOutboundPrimaryClip(item)
                 }
             }
         }
