@@ -28,6 +28,7 @@ import androidx.core.os.UserManagerCompat
 import dev.patrickgold.florisboard.app.FlorisPreferenceModel
 import dev.patrickgold.florisboard.app.FlorisPreferenceStore
 import dev.patrickgold.florisboard.ime.clipboard.ClipboardManager
+import dev.patrickgold.florisboard.ime.clipboard.lan.LanClipboardSyncManager
 import dev.patrickgold.florisboard.ime.core.SubtypeManager
 import dev.patrickgold.florisboard.ime.dictionary.DictionaryManager
 import dev.patrickgold.florisboard.ime.editor.EditorInstance
@@ -79,6 +80,7 @@ class FlorisApplication : Application() {
     val extensionManager = lazy { ExtensionManager(this) }
     val glideTypingManager = lazy { GlideTypingManager(this) }
     val keyboardManager = lazy { KeyboardManager(this) }
+    val lanClipboardSyncManager = lazy { LanClipboardSyncManager(this) }
     val nlpManager = lazy { NlpManager(this) }
     val subtypeManager = lazy { SubtypeManager(this) }
     val themeManager = lazy { ThemeManager(this) }
@@ -121,6 +123,7 @@ class FlorisApplication : Application() {
             )
             Log.i("PREFS", result.toString())
             preferenceStoreLoaded.value = true
+            lanClipboardSyncManager.value.initialize()
         }
         extensionManager.value.init()
         clipboardManager.value.initializeForContext(this)
@@ -166,6 +169,8 @@ fun Context.extensionManager() = this.florisApplication().extensionManager
 fun Context.glideTypingManager() = this.florisApplication().glideTypingManager
 
 fun Context.keyboardManager() = this.florisApplication().keyboardManager
+
+fun Context.lanClipboardSyncManager() = this.florisApplication().lanClipboardSyncManager
 
 fun Context.nlpManager() = this.florisApplication().nlpManager
 

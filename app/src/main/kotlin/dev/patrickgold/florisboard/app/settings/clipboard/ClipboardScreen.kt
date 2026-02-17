@@ -16,17 +16,33 @@
 
 package dev.patrickgold.florisboard.app.settings.clipboard
 
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState as collectAsStateFlow
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.LocalContext
+import dev.patrickgold.florisboard.lanClipboardSyncManager
 import dev.patrickgold.florisboard.R
 import dev.patrickgold.florisboard.app.enumDisplayEntriesOf
 import dev.patrickgold.florisboard.ime.clipboard.CLIPBOARD_HISTORY_NUM_GRID_COLUMNS_AUTO
 import dev.patrickgold.florisboard.ime.clipboard.ClipboardSyncBehavior
+import dev.patrickgold.florisboard.ime.clipboard.lan.LanClipboardConnectionState
+import dev.patrickgold.florisboard.ime.clipboard.lan.LanClipboardEndpointMode
 import dev.patrickgold.florisboard.lib.compose.FlorisScreen
+import dev.patrickgold.jetpref.datastore.model.collectAsState
 import dev.patrickgold.jetpref.datastore.ui.DialogSliderPreference
 import dev.patrickgold.jetpref.datastore.ui.ExperimentalJetPrefDatastoreUi
 import dev.patrickgold.jetpref.datastore.ui.ListPreference
+import dev.patrickgold.jetpref.datastore.ui.Preference
 import dev.patrickgold.jetpref.datastore.ui.PreferenceGroup
 import dev.patrickgold.jetpref.datastore.ui.SwitchPreference
+import dev.patrickgold.jetpref.material.ui.JetPrefAlertDialog
+import dev.patrickgold.jetpref.material.ui.JetPrefTextField
+import kotlinx.coroutines.launch
 import org.florisboard.lib.android.AndroidVersion
 import org.florisboard.lib.compose.pluralsRes
 import org.florisboard.lib.compose.stringRes
@@ -37,7 +53,28 @@ fun ClipboardScreen() = FlorisScreen {
     title = stringRes(R.string.settings__clipboard__title)
     previewFieldVisible = true
 
+    val context = LocalContext.current
+    val lanClipboardSyncManager by context.lanClipboardSyncManager()
+    val lanConnectionStatus by lanClipboardSyncManager.connectionStatusFlow.collectAsStateFlow()
+    val activeEndpoint by lanClipboardSyncManager.activeEndpointFlow.collectAsStateFlow()
+    val discoveredEndpoints by lanClipboardSyncManager.discoveredEndpointsFlow.collectAsStateFlow()
+
     content {
+        val scope = rememberCoroutineScope()
+        val lanSyncEnabled by prefs.clipboard.lanSyncEnabled.collectAsState()
+        val lanSyncEndpointMode by prefs.clipboard.lanSyncEndpointMode.collectAsState()
+        val lanSyncHost by prefs.clipboard.lanSyncHost.collectAsState()
+        val lanSyncPort by prefs.clipboard.lanSyncPort.collectAsState()
+        val lanSyncToken by prefs.clipboard.lanSyncToken.collectAsState()
+
+        var showHostDialog by rememberSaveable { mutableStateOf(false) }
+        var showPortDialog by rememberSaveable { mutableStateOf(false) }
+        var showTokenDialog by rememberSaveable { mutableStateOf(false) }
+        var hostDraft by rememberSaveable { mutableStateOf(lanSyncHost) }
+        var portDraft by rememberSaveable { mutableStateOf(lanSyncPort.toString()) }
+        var tokenDraft by rememberSaveable { mutableStateOf(lanSyncToken) }
+        var portValidationError by rememberSaveable { mutableStateOf(false) }
+
         SwitchPreference(
             prefs.clipboard.useInternalClipboard,
             title = stringRes(R.string.pref__clipboard__use_internal_clipboard__label),
@@ -159,6 +196,177 @@ fun ClipboardScreen() = FlorisScreen {
                 summary = stringRes(R.string.pref__clipboard__clear_primary_clip_affects_history_if_unpinned__summary),
                 enabledIf = { prefs.clipboard.historyEnabled isEqualTo true },
             )
+        }
+
+        PreferenceGroup(title = stringRes(R.string.pref__clipboard__group_lan_sync__label)) {
+            SwitchPreference(
+                prefs.clipboard.lanSyncEnabled,
+                title = stringRes(R.string.pref__clipboard__lan_sync_enabled__label),
+                summary = stringRes(R.string.pref__clipboard__lan_sync_enabled__summary),
+            )
+            ListPreference(
+                prefs.clipboard.lanSyncEndpointMode,
+                title = stringRes(R.string.pref__clipboard__lan_sync_endpoint_mode__label),
+                entries = enumDisplayEntriesOf(LanClipboardEndpointMode::class),
+                enabledIf = { prefs.clipboard.lanSyncEnabled isEqualTo true },
+            )
+            Preference(
+                title = stringRes(R.string.pref__clipboard__lan_sync_manual_host__label),
+                summary = if (lanSyncHost.isBlank()) {
+                    stringRes(R.string.pref__clipboard__lan_sync_manual_host__summary_empty)
+                } else {
+                    lanSyncHost
+                },
+                onClick = {
+                    hostDraft = lanSyncHost
+                    showHostDialog = true
+                },
+            )
+            Preference(
+                title = stringRes(R.string.pref__clipboard__lan_sync_manual_port__label),
+                summary = lanSyncPort.toString(),
+                onClick = {
+                    portDraft = lanSyncPort.toString()
+                    portValidationError = false
+                    showPortDialog = true
+                },
+            )
+            Preference(
+                title = stringRes(R.string.pref__clipboard__lan_sync_pairing_token__label),
+                summary = if (lanSyncToken.isBlank()) {
+                    stringRes(R.string.pref__clipboard__lan_sync_pairing_token__summary_empty)
+                } else {
+                    stringRes(
+                        R.string.pref__clipboard__lan_sync_pairing_token__summary_masked,
+                        "suffix" to lanSyncToken.takeLast(4),
+                    )
+                },
+                onClick = {
+                    tokenDraft = lanSyncToken
+                    showTokenDialog = true
+                },
+            )
+            SwitchPreference(
+                prefs.clipboard.lanSyncAutoReconnect,
+                title = stringRes(R.string.pref__clipboard__lan_sync_auto_reconnect__label),
+                summary = stringRes(R.string.pref__clipboard__lan_sync_auto_reconnect__summary),
+                enabledIf = { prefs.clipboard.lanSyncEnabled isEqualTo true },
+            )
+            Preference(
+                title = stringRes(R.string.pref__clipboard__lan_sync_connection_status__label),
+                summary = when (lanConnectionStatus.state) {
+                    LanClipboardConnectionState.DISABLED -> stringRes(R.string.pref__clipboard__lan_sync_status__disabled)
+                    LanClipboardConnectionState.DISCOVERING -> stringRes(R.string.pref__clipboard__lan_sync_status__discovering)
+                    LanClipboardConnectionState.CONNECTING -> stringRes(
+                        R.string.pref__clipboard__lan_sync_status__connecting,
+                        "endpoint" to (lanConnectionStatus.endpoint?.displayAddress()
+                            ?: discoveredEndpoints.firstOrNull()?.displayAddress()
+                            ?: stringRes(R.string.general__unknown))
+                    )
+                    LanClipboardConnectionState.CONNECTED -> stringRes(
+                        R.string.pref__clipboard__lan_sync_status__connected,
+                        "endpoint" to (activeEndpoint?.displayAddress()
+                            ?: lanConnectionStatus.endpoint?.displayAddress()
+                            ?: stringRes(R.string.general__unknown))
+                    )
+                    LanClipboardConnectionState.RECONNECTING -> stringRes(
+                        R.string.pref__clipboard__lan_sync_status__reconnecting,
+                        "attempt" to lanConnectionStatus.retryAttempt,
+                    )
+                    LanClipboardConnectionState.ERROR -> lanConnectionStatus.message
+                        ?: stringRes(R.string.pref__clipboard__lan_sync_status__error)
+                },
+            )
+            if (lanSyncEndpointMode == LanClipboardEndpointMode.AUTO_DISCOVERY && discoveredEndpoints.isNotEmpty()) {
+                Preference(
+                    title = stringRes(R.string.pref__clipboard__lan_sync_discovered_endpoint__label),
+                    summary = discoveredEndpoints.first().displayAddress(),
+                )
+            }
+            if (lanSyncEnabled && lanSyncEndpointMode == LanClipboardEndpointMode.MANUAL) {
+                Preference(
+                    title = stringRes(R.string.pref__clipboard__lan_sync_selected_endpoint__label),
+                    summary = if (lanSyncHost.isBlank()) {
+                        stringRes(R.string.pref__clipboard__lan_sync_manual_host__summary_empty)
+                    } else {
+                        "$lanSyncHost:$lanSyncPort"
+                    },
+                )
+            }
+        }
+
+        if (showHostDialog) {
+            JetPrefAlertDialog(
+                title = stringRes(R.string.pref__clipboard__lan_sync_manual_host__dialog_title),
+                confirmLabel = stringRes(R.string.action__apply),
+                onConfirm = {
+                    scope.launch {
+                        prefs.clipboard.lanSyncHost.set(hostDraft.trim())
+                    }
+                    showHostDialog = false
+                },
+                dismissLabel = stringRes(R.string.action__cancel),
+                onDismiss = { showHostDialog = false },
+            ) {
+                JetPrefTextField(
+                    value = hostDraft,
+                    onValueChange = { hostDraft = it },
+                )
+            }
+        }
+
+        if (showPortDialog) {
+            JetPrefAlertDialog(
+                title = stringRes(R.string.pref__clipboard__lan_sync_manual_port__dialog_title),
+                confirmLabel = stringRes(R.string.action__apply),
+                onConfirm = {
+                    val parsedPort = portDraft.toIntOrNull()
+                    if (parsedPort == null || parsedPort !in 1..65535) {
+                        portValidationError = true
+                    } else {
+                        scope.launch {
+                            prefs.clipboard.lanSyncPort.set(parsedPort)
+                        }
+                        showPortDialog = false
+                    }
+                },
+                dismissLabel = stringRes(R.string.action__cancel),
+                onDismiss = {
+                    portValidationError = false
+                    showPortDialog = false
+                },
+            ) {
+                JetPrefTextField(
+                    value = portDraft,
+                    onValueChange = {
+                        portDraft = it
+                        portValidationError = false
+                    },
+                )
+                if (portValidationError) {
+                    Text(text = stringRes(R.string.pref__clipboard__lan_sync_manual_port__error))
+                }
+            }
+        }
+
+        if (showTokenDialog) {
+            JetPrefAlertDialog(
+                title = stringRes(R.string.pref__clipboard__lan_sync_pairing_token__dialog_title),
+                confirmLabel = stringRes(R.string.action__apply),
+                onConfirm = {
+                    scope.launch {
+                        prefs.clipboard.lanSyncToken.set(tokenDraft.trim())
+                    }
+                    showTokenDialog = false
+                },
+                dismissLabel = stringRes(R.string.action__cancel),
+                onDismiss = { showTokenDialog = false },
+            ) {
+                JetPrefTextField(
+                    value = tokenDraft,
+                    onValueChange = { tokenDraft = it },
+                )
+            }
         }
     }
 }

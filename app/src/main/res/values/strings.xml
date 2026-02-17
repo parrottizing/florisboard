@@ -734,6 +734,31 @@
     <string name="pref__clipboard__history_hide_on_next_text_field__label">Hide history on next text field</string>
     <string name="pref__clipboard__clear_primary_clip_affects_history_if_unpinned__label">Clear primary clip affects history</string>
     <string name="pref__clipboard__clear_primary_clip_affects_history_if_unpinned__summary">Clearing the primary clip also removes it from the history, if not pinned</string>
+    <string name="pref__clipboard__group_lan_sync__label">LAN clipboard sync</string>
+    <string name="pref__clipboard__lan_sync_enabled__label">Enable LAN clipboard sync</string>
+    <string name="pref__clipboard__lan_sync_enabled__summary">Sync clipboard content with a paired LAN bridge</string>
+    <string name="pref__clipboard__lan_sync_endpoint_mode__label">Endpoint mode</string>
+    <string name="pref__clipboard__lan_sync_manual_host__label">Manual host</string>
+    <string name="pref__clipboard__lan_sync_manual_host__summary_empty">No manual host configured</string>
+    <string name="pref__clipboard__lan_sync_manual_host__dialog_title">Set manual host</string>
+    <string name="pref__clipboard__lan_sync_manual_port__label">Manual port</string>
+    <string name="pref__clipboard__lan_sync_manual_port__dialog_title">Set manual port</string>
+    <string name="pref__clipboard__lan_sync_manual_port__error">Enter a valid TCP port (1-65535)</string>
+    <string name="pref__clipboard__lan_sync_pairing_token__label">Pairing token</string>
+    <string name="pref__clipboard__lan_sync_pairing_token__summary_empty">No pairing token configured</string>
+    <string name="pref__clipboard__lan_sync_pairing_token__summary_masked">Configured (…{suffix})</string>
+    <string name="pref__clipboard__lan_sync_pairing_token__dialog_title">Set pairing token</string>
+    <string name="pref__clipboard__lan_sync_auto_reconnect__label">Auto reconnect</string>
+    <string name="pref__clipboard__lan_sync_auto_reconnect__summary">Retry connection with exponential backoff after disconnects</string>
+    <string name="pref__clipboard__lan_sync_connection_status__label">Connection status</string>
+    <string name="pref__clipboard__lan_sync_status__disabled">Disabled</string>
+    <string name="pref__clipboard__lan_sync_status__discovering">Discovering LAN bridge…</string>
+    <string name="pref__clipboard__lan_sync_status__connecting">Connecting to {endpoint}…</string>
+    <string name="pref__clipboard__lan_sync_status__connected">Connected to {endpoint}</string>
+    <string name="pref__clipboard__lan_sync_status__reconnecting">Reconnecting (attempt {attempt})…</string>
+    <string name="pref__clipboard__lan_sync_status__error">Connection error</string>
+    <string name="pref__clipboard__lan_sync_discovered_endpoint__label">Discovered endpoint</string>
+    <string name="pref__clipboard__lan_sync_selected_endpoint__label">Selected endpoint</string>
     <string name="send_to_clipboard__unknown_error">An unknown error occurred. Please try again!</string>
     <string name="send_to_clipboard__type_not_supported_error">This media type is not supported.</string>
     <string name="send_to_clipboard__description__copied_image_to_clipboard">Copied below image to clipboard.</string>
@@ -926,6 +951,7 @@
     <string name="general__file_name">File name</string>
     <string name="general__properties">Properties</string>
     <string name="general__auto" comment="Generic shorthand for 'Automatic' value">Auto</string>
+    <string name="general__unknown">Unknown</string>
 
     <!-- Screen orientation strings -->
     <string name="screen_orientation__portrait">Portrait</string>
@@ -958,6 +984,10 @@
     <string name="enum__clipboard_sync_behavior__only_set_events__description" comment="Enum value description">Only events setting clip data are synced in this direction. In this mode, sync includes text content.</string>
     <string name="enum__clipboard_sync_behavior__all_events" comment="Enum value label">All events</string>
     <string name="enum__clipboard_sync_behavior__all_events__description" comment="Enum value description">Both events setting and clearing clip data are synced in this direction. In this mode, sync includes text content.</string>
+    <string name="enum__lan_clipboard_endpoint_mode__auto_discovery" comment="Enum value label">Auto discovery</string>
+    <string name="enum__lan_clipboard_endpoint_mode__auto_discovery__description" comment="Enum value description">Use mDNS on the local network and fall back to manual host/port when needed</string>
+    <string name="enum__lan_clipboard_endpoint_mode__manual" comment="Enum value label">Manual endpoint</string>
+    <string name="enum__lan_clipboard_endpoint_mode__manual__description" comment="Enum value description">Always connect using the configured manual host and port</string>
 
     <string name="enum__color_representation__hex" comment="Enum value label">Hexadecimal</string>
     <string name="enum__color_representation__rgb" comment="Enum value label">Red Green Blue</string>

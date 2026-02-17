@@ -25,6 +25,8 @@ import dev.patrickgold.florisboard.app.settings.theme.SnyggLevel
 import dev.patrickgold.florisboard.app.setup.NotificationPermissionState
 import dev.patrickgold.florisboard.ime.clipboard.CLIPBOARD_HISTORY_NUM_GRID_COLUMNS_AUTO
 import dev.patrickgold.florisboard.ime.clipboard.ClipboardSyncBehavior
+import dev.patrickgold.florisboard.ime.clipboard.lan.LAN_CLIPBOARD_DEFAULT_PORT
+import dev.patrickgold.florisboard.ime.clipboard.lan.LanClipboardEndpointMode
 import dev.patrickgold.florisboard.ime.core.DisplayLanguageNamesIn
 import dev.patrickgold.florisboard.ime.core.Subtype
 import dev.patrickgold.florisboard.ime.input.CapitalizationBehavior
@@ -152,6 +154,30 @@ abstract class FlorisPreferenceModel : PreferenceModel() {
         )
         val clearPrimaryClipAffectsHistoryIfUnpinned = boolean(
             key = "clipboard__clear_primary_clip_affects_history_if_unpinned",
+            default = true,
+        )
+        val lanSyncEnabled = boolean(
+            key = "clipboard__lan_sync_enabled",
+            default = false,
+        )
+        val lanSyncEndpointMode = enum(
+            key = "clipboard__lan_sync_endpoint_mode",
+            default = LanClipboardEndpointMode.AUTO_DISCOVERY,
+        )
+        val lanSyncHost = string(
+            key = "clipboard__lan_sync_host",
+            default = "",
+        )
+        val lanSyncPort = int(
+            key = "clipboard__lan_sync_port",
+            default = LAN_CLIPBOARD_DEFAULT_PORT,
+        )
+        val lanSyncToken = string(
+            key = "clipboard__lan_sync_token",
+            default = "",
+        )
+        val lanSyncAutoReconnect = boolean(
+            key = "clipboard__lan_sync_auto_reconnect",
             default = true,
         )
     }

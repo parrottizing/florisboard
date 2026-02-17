@@ -21,6 +21,7 @@ import dev.patrickgold.florisboard.R
 import dev.patrickgold.florisboard.app.settings.theme.DisplayKbdAfterDialogs
 import dev.patrickgold.florisboard.app.settings.theme.SnyggLevel
 import dev.patrickgold.florisboard.ime.clipboard.ClipboardSyncBehavior
+import dev.patrickgold.florisboard.ime.clipboard.lan.LanClipboardEndpointMode
 import dev.patrickgold.florisboard.ime.core.DisplayLanguageNamesIn
 import dev.patrickgold.florisboard.ime.input.CapitalizationBehavior
 import dev.patrickgold.florisboard.ime.input.HapticVibrationMode
@@ -126,6 +127,20 @@ private val ENUM_DISPLAY_ENTRIES = mapOf<Pair<KClass<*>, String>, @Composable ()
                 key = ClipboardSyncBehavior.ALL_EVENTS,
                 label = stringRes(R.string.enum__clipboard_sync_behavior__all_events),
                 description = stringRes(R.string.enum__clipboard_sync_behavior__all_events__description),
+            )
+        }
+    },
+    LanClipboardEndpointMode::class to DEFAULT to {
+        listPrefEntries {
+            entry(
+                key = LanClipboardEndpointMode.AUTO_DISCOVERY,
+                label = stringRes(R.string.enum__lan_clipboard_endpoint_mode__auto_discovery),
+                description = stringRes(R.string.enum__lan_clipboard_endpoint_mode__auto_discovery__description),
+            )
+            entry(
+                key = LanClipboardEndpointMode.MANUAL,
+                label = stringRes(R.string.enum__lan_clipboard_endpoint_mode__manual),
+                description = stringRes(R.string.enum__lan_clipboard_endpoint_mode__manual__description),
             )
         }
     },
