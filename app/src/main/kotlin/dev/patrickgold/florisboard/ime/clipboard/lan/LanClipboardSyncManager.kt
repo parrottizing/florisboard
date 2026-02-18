@@ -23,6 +23,7 @@ import dev.patrickgold.florisboard.ime.clipboard.provider.ItemType
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.abs
 import kotlin.coroutines.resume
 import kotlin.random.Random
 import kotlinx.coroutines.CoroutineScope
@@ -41,8 +42,13 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -54,6 +60,7 @@ private const val HEARTBEAT_TIMEOUT_MS = 45_000L
 private const val BACKOFF_BASE_MS = 250L
 private const val BACKOFF_CAP_MS = 5_000L
 private const val MAX_TEXT_EVENT_CHARS = 262_144
+private const val STALE_EVENT_WINDOW_MS = 120_000L
 
 class LanClipboardSyncManager(
     context: Context,
@@ -79,6 +86,13 @@ class LanClipboardSyncManager(
     val activeEndpointFlow: StateFlow<LanClipboardEndpoint?> = _activeEndpointFlow.asStateFlow()
 
     val discoveredEndpointsFlow: StateFlow<List<LanClipboardEndpoint>> = discovery.endpointsFlow
+    private val inboundDedupeCache = LanClipboardInboundDedupeCache()
+    @Volatile
+    private var inboundTextHandler: ((text: String, isSensitive: Boolean) -> Boolean)? = null
+
+    fun setInboundTextHandler(handler: ((text: String, isSensitive: Boolean) -> Boolean)?) {
+        inboundTextHandler = handler
+    }
 
     fun submitOutboundPrimaryClip(item: ClipboardItem?) {
         if (!prefs.clipboard.lanSyncEnabled.get() || item == null) {
@@ -89,6 +103,12 @@ class LanClipboardSyncManager(
         }
         val text = item.text ?: return
         if (text.isBlank() || text.length > MAX_TEXT_EVENT_CHARS) {
+            return
+        }
+        val outboundPayloadHash = LanClipboardProtocol.computePayloadHash(
+            buildTextPayload(text = text, isSensitive = item.isSensitive),
+        )
+        if (inboundDedupeCache.hasRecentPayloadHash(LAN_CLIPBOARD_SOURCE_MAC, outboundPayloadHash)) {
             return
         }
 
@@ -321,6 +341,28 @@ class LanClipboardSyncManager(
                                 ?: ""
                             webSocket.send(LanClipboardProtocol.buildPongEvent(deviceId, nonce))
                         }
+                        "set_text" -> {
+                            handleInboundSetText(webSocket, envelope)
+                        }
+                        "set_image" -> {
+                            val eventId = envelope["event_id"]?.jsonPrimitive?.contentOrNull
+                            if (!eventId.isNullOrBlank()) {
+                                sendRejectedWithError(
+                                    webSocket = webSocket,
+                                    eventId = eventId,
+                                    code = "UNSUPPORTED_TYPE",
+                                    message = "set_image is disabled in v1 mode",
+                                )
+                            } else {
+                                webSocket.send(
+                                    LanClipboardProtocol.buildErrorEvent(
+                                        deviceId = deviceId,
+                                        code = "UNSUPPORTED_TYPE",
+                                        message = "set_image is disabled in v1 mode",
+                                    ),
+                                )
+                            }
+                        }
                         "error" -> {
                             val errorCode = LanClipboardProtocol.payloadOrNull(envelope)
                                 ?.get("code")
@@ -371,6 +413,208 @@ class LanClipboardSyncManager(
                 detachActiveSocket(ws)
                 ws.cancel()
             }
+        }
+    }
+
+    private fun handleInboundSetText(webSocket: WebSocket, envelope: JsonObject) {
+        val nowMs = System.currentTimeMillis()
+        val eventId = envelope["event_id"]?.jsonPrimitive?.contentOrNull
+        if (eventId.isNullOrBlank()) {
+            webSocket.send(
+                LanClipboardProtocol.buildErrorEvent(
+                    deviceId = deviceId,
+                    code = "BAD_MESSAGE",
+                    message = "set_text event is missing event_id",
+                ),
+            )
+            return
+        }
+
+        val protocolVersion = envelope["protocol_version"]?.jsonPrimitive?.contentOrNull
+        if (!LanClipboardProtocol.isSupportedProtocolVersion(protocolVersion)) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "VERSION_MISMATCH",
+                message = "Unsupported protocol_version for set_text event",
+            )
+            return
+        }
+
+        val source = envelope["source"]?.jsonPrimitive?.contentOrNull
+        if (!LanClipboardProtocol.isSupportedSource(source)) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_text event source must be android or mac",
+            )
+            return
+        }
+        val normalizedSource = source ?: return
+
+        val payloadHash = envelope["payload_hash"]?.jsonPrimitive?.contentOrNull
+        if (payloadHash.isNullOrBlank()) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_text event is missing payload_hash",
+            )
+            return
+        }
+
+        if (inboundDedupeCache.hasSeenEventId(normalizedSource, eventId, nowMs)) {
+            sendAck(webSocket, eventId = eventId, status = "duplicate")
+            return
+        }
+
+        val createdAtMs = envelope["created_at_ms"]?.jsonPrimitive?.longOrNull
+        if (createdAtMs == null) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_text event has invalid created_at_ms",
+            )
+            return
+        }
+        if (abs(nowMs - createdAtMs) > STALE_EVENT_WINDOW_MS) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "STALE_EVENT",
+                message = "set_text event is outside the stale window",
+            )
+            return
+        }
+
+        val payload = LanClipboardProtocol.payloadOrNull(envelope)
+        if (payload == null) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_text event is missing payload",
+            )
+            return
+        }
+
+        val computedPayloadHash = LanClipboardProtocol.computePayloadHash(payload)
+        if (!payloadHash.equals(computedPayloadHash, ignoreCase = false)) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "HASH_MISMATCH",
+                message = "payload_hash does not match payload",
+            )
+            return
+        }
+
+        val mimeType = payload["mime_type"]?.jsonPrimitive?.contentOrNull
+        if (mimeType != "text/plain") {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "UNSUPPORTED_TYPE",
+                message = "set_text payload mime_type must be text/plain",
+            )
+            return
+        }
+
+        val text = payload["text"]?.jsonPrimitive?.contentOrNull
+        if (text == null) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_text payload text must be a string",
+            )
+            return
+        }
+        if (text.length > MAX_TEXT_EVENT_CHARS) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "PAYLOAD_TOO_LARGE",
+                message = "set_text payload exceeds maximum supported size",
+            )
+            return
+        }
+
+        val isSensitiveElement = payload["is_sensitive"]?.jsonPrimitive
+        val isSensitive = if (isSensitiveElement == null) {
+            false
+        } else {
+            isSensitiveElement.booleanOrNull ?: run {
+                sendRejectedWithError(
+                    webSocket = webSocket,
+                    eventId = eventId,
+                    code = "BAD_MESSAGE",
+                    message = "set_text payload is_sensitive must be boolean",
+                )
+                return
+            }
+        }
+
+        if (inboundDedupeCache.hasRecentPayloadHash(normalizedSource, payloadHash, nowMs)) {
+            inboundDedupeCache.record(normalizedSource, eventId, payloadHash, nowMs)
+            sendAck(webSocket, eventId = eventId, status = "duplicate")
+            return
+        }
+
+        val applied = runCatching {
+            inboundTextHandler?.invoke(text, isSensitive) ?: false
+        }.getOrDefault(false)
+        if (!applied) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "TEMPORARY_UNAVAILABLE",
+                message = "Failed applying inbound clipboard text",
+                retryable = true,
+            )
+            return
+        }
+
+        inboundDedupeCache.record(normalizedSource, eventId, payloadHash, nowMs)
+        sendAck(webSocket, eventId = eventId, status = "accepted")
+    }
+
+    private fun sendAck(webSocket: WebSocket, eventId: String, status: String, errorCode: String? = null) {
+        webSocket.send(
+            LanClipboardProtocol.buildAckEvent(
+                deviceId = deviceId,
+                ackedEventId = eventId,
+                status = status,
+                errorCode = errorCode,
+            ),
+        )
+    }
+
+    private fun sendRejectedWithError(
+        webSocket: WebSocket,
+        eventId: String,
+        code: String,
+        message: String,
+        retryable: Boolean = false,
+    ) {
+        sendAck(webSocket, eventId = eventId, status = "rejected", errorCode = code)
+        webSocket.send(
+            LanClipboardProtocol.buildErrorEvent(
+                deviceId = deviceId,
+                code = code,
+                message = message,
+                retryable = retryable,
+            ),
+        )
+    }
+
+    private fun buildTextPayload(text: String, isSensitive: Boolean): JsonObject {
+        return buildJsonObject {
+            put("mime_type", JsonPrimitive("text/plain"))
+            put("text", JsonPrimitive(text))
+            put("is_sensitive", JsonPrimitive(isSensitive))
         }
     }
 
