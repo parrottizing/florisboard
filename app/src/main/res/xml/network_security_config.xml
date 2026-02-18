@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <base-config cleartextTrafficPermitted="false" />
+    <base-config cleartextTrafficPermitted="true" />
 
-    <!-- Restrict cleartext to local-network hostnames used by LAN clipboard sync. -->
+    <!-- Keep explicit local domains for LAN clipboard sync hostnames. -->
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="true">local</domain>
         <domain>localhost</domain>

@@ -61,6 +61,7 @@ class ClipboardManager(
     companion object {
         // 1 minute
         private const val INTERVAL = 60 * 1000L
+        private const val MAX_LAN_TEXT_CHARS = 262_144
 
         /**
          * Taken from ClipboardDescription.java from the AOSP
@@ -117,6 +118,9 @@ class ClipboardManager(
 
     init {
         systemClipboardManager.addPrimaryClipChangedListener(this)
+        lanClipboardSyncManager.setInboundTextHandler { text, isSensitive ->
+            applyInboundLanText(text, isSensitive)
+        }
         cleanUpJob = ioScope.launch {
             while (isActive) {
                 delay(INTERVAL)
@@ -221,6 +225,29 @@ class ClipboardManager(
     private fun addNewClip(item: ClipboardItem) {
         insertOrMoveBeginning(item)
         updatePrimaryClip(item)
+    }
+
+    private fun applyInboundLanText(text: String, isSensitive: Boolean): Boolean {
+        if (text.length > MAX_LAN_TEXT_CHARS) {
+            return false
+        }
+        return runCatching {
+            addNewClip(
+                ClipboardItem(
+                    type = ItemType.TEXT,
+                    text = text,
+                    uri = null,
+                    creationTimestampMs = System.currentTimeMillis(),
+                    isPinned = false,
+                    mimeTypes = listOf("text/plain"),
+                    isSensitive = isSensitive,
+                    isRemoteDevice = true,
+                ),
+            )
+            true
+        }.getOrElse {
+            false
+        }
     }
 
     /**
@@ -407,6 +434,7 @@ class ClipboardManager(
      */
     override fun close() {
         systemClipboardManager.removePrimaryClipChangedListener(this)
+        lanClipboardSyncManager.setInboundTextHandler(null)
         cleanUpJob.cancel()
     }
 }

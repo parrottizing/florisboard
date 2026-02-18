@@ -80,6 +80,63 @@ class LanClipboardProtocolTest : FunSpec({
         LanClipboardProtocol.computePayloadHash(payloadA) shouldBe LanClipboardProtocol.computePayloadHash(payloadB)
     }
 
+    test("isSupportedProtocolVersion requires same major and semver format") {
+        LanClipboardProtocol.isSupportedProtocolVersion("1.0") shouldBe true
+        LanClipboardProtocol.isSupportedProtocolVersion("1.99") shouldBe true
+
+        LanClipboardProtocol.isSupportedProtocolVersion("2.0") shouldBe false
+        LanClipboardProtocol.isSupportedProtocolVersion("1") shouldBe false
+        LanClipboardProtocol.isSupportedProtocolVersion("1.a") shouldBe false
+        LanClipboardProtocol.isSupportedProtocolVersion(null) shouldBe false
+    }
+
+    test("isSupportedSource allows only android and mac") {
+        LanClipboardProtocol.isSupportedSource(LAN_CLIPBOARD_SOURCE_ANDROID) shouldBe true
+        LanClipboardProtocol.isSupportedSource(LAN_CLIPBOARD_SOURCE_MAC) shouldBe true
+
+        LanClipboardProtocol.isSupportedSource("ios") shouldBe false
+        LanClipboardProtocol.isSupportedSource("") shouldBe false
+        LanClipboardProtocol.isSupportedSource(null) shouldBe false
+    }
+
+    test("buildAckEvent includes status and optional error code") {
+        val ackJson = LanClipboardProtocol.buildAckEvent(
+            deviceId = "android.pixel.test",
+            ackedEventId = "evt-123",
+            status = "rejected",
+            errorCode = "BAD_MESSAGE",
+        )
+        val envelope = LanClipboardProtocol.parseEnvelope(ackJson)
+        envelope shouldNotBe null
+
+        val nonNullEnvelope = envelope!!
+        nonNullEnvelope["event_type"]?.jsonPrimitive?.contentOrNull shouldBe "ack"
+        val payload = LanClipboardProtocol.payloadOrNull(nonNullEnvelope)
+        payload shouldNotBe null
+        payload!!["acked_event_id"]?.jsonPrimitive?.contentOrNull shouldBe "evt-123"
+        payload["status"]?.jsonPrimitive?.contentOrNull shouldBe "rejected"
+        payload["error_code"]?.jsonPrimitive?.contentOrNull shouldBe "BAD_MESSAGE"
+    }
+
+    test("buildErrorEvent includes protocol error envelope") {
+        val errorJson = LanClipboardProtocol.buildErrorEvent(
+            deviceId = "android.pixel.test",
+            code = "TEMPORARY_UNAVAILABLE",
+            message = "Failed applying inbound clipboard text",
+            retryable = true,
+        )
+        val envelope = LanClipboardProtocol.parseEnvelope(errorJson)
+        envelope shouldNotBe null
+
+        val nonNullEnvelope = envelope!!
+        nonNullEnvelope["event_type"]?.jsonPrimitive?.contentOrNull shouldBe "error"
+        val payload = LanClipboardProtocol.payloadOrNull(nonNullEnvelope)
+        payload shouldNotBe null
+        payload!!["code"]?.jsonPrimitive?.contentOrNull shouldBe "TEMPORARY_UNAVAILABLE"
+        payload["message"]?.jsonPrimitive?.contentOrNull shouldBe "Failed applying inbound clipboard text"
+        payload["retryable"]?.jsonPrimitive?.contentOrNull shouldBe "true"
+    }
+
     test("websocketUrl normalizes endpoint host and path") {
         LanClipboardEndpoint(
             host = "::1",

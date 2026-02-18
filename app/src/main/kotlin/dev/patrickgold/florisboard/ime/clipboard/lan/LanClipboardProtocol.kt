@@ -34,9 +34,11 @@ import kotlinx.serialization.json.jsonPrimitive
 
 const val LAN_CLIPBOARD_PROTOCOL_VERSION = "1.0"
 const val LAN_CLIPBOARD_SOURCE_ANDROID = "android"
+const val LAN_CLIPBOARD_SOURCE_MAC = "mac"
 const val LAN_CLIPBOARD_DEFAULT_PATH = "/v1/clipboard"
 const val LAN_CLIPBOARD_DEFAULT_PORT = 8765
 const val LAN_CLIPBOARD_MDNS_SERVICE_TYPE = "_gumlet-clipboard._tcp"
+private val PROTOCOL_VERSION_PATTERN = Regex("^\\d+\\.\\d+$")
 
 private val compactJson = Json {
     ignoreUnknownKeys = true
@@ -46,6 +48,19 @@ private val compactJson = Json {
 }
 
 object LanClipboardProtocol {
+    fun isSupportedProtocolVersion(version: String?): Boolean {
+        if (version.isNullOrBlank() || !PROTOCOL_VERSION_PATTERN.matches(version)) {
+            return false
+        }
+        val expectedMajor = LAN_CLIPBOARD_PROTOCOL_VERSION.substringBefore('.')
+        val actualMajor = version.substringBefore('.')
+        return expectedMajor == actualMajor
+    }
+
+    fun isSupportedSource(source: String?): Boolean {
+        return source == LAN_CLIPBOARD_SOURCE_ANDROID || source == LAN_CLIPBOARD_SOURCE_MAC
+    }
+
     fun buildPingEvent(deviceId: String): String {
         val payload = buildJsonObject {
             put("nonce", JsonPrimitive(UUID.randomUUID().toString()))
@@ -81,6 +96,44 @@ object LanClipboardProtocol {
         return buildEvent(
             deviceId = deviceId,
             eventType = "set_text",
+            payload = payload,
+        )
+    }
+
+    fun buildAckEvent(
+        deviceId: String,
+        ackedEventId: String,
+        status: String,
+        errorCode: String? = null,
+    ): String {
+        val payload = buildJsonObject {
+            put("acked_event_id", JsonPrimitive(ackedEventId))
+            put("status", JsonPrimitive(status))
+            if (!errorCode.isNullOrBlank()) {
+                put("error_code", JsonPrimitive(errorCode))
+            }
+        }
+        return buildEvent(
+            deviceId = deviceId,
+            eventType = "ack",
+            payload = payload,
+        )
+    }
+
+    fun buildErrorEvent(
+        deviceId: String,
+        code: String,
+        message: String,
+        retryable: Boolean = false,
+    ): String {
+        val payload = buildJsonObject {
+            put("code", JsonPrimitive(code))
+            put("message", JsonPrimitive(message))
+            put("retryable", JsonPrimitive(retryable))
+        }
+        return buildEvent(
+            deviceId = deviceId,
+            eventType = "error",
             payload = payload,
         )
     }
