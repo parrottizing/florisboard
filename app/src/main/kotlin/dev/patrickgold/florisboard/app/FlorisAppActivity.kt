@@ -48,6 +48,11 @@ import dev.patrickgold.florisboard.app.ext.ExtensionImportScreenType
 import dev.patrickgold.florisboard.app.setup.NotificationPermissionState
 import dev.patrickgold.florisboard.appContext
 import dev.patrickgold.florisboard.cacheManager
+import dev.patrickgold.florisboard.lanClipboardSyncManager
+import dev.patrickgold.florisboard.ime.clipboard.lan.LanClipboardEndpointMode
+import dev.patrickgold.florisboard.ime.clipboard.lan.buildLanClipboardDeviceId
+import dev.patrickgold.florisboard.ime.clipboard.lan.parseLanClipboardPairingOffer
+import dev.patrickgold.florisboard.ime.clipboard.lan.redeemLanClipboardPairingOffer
 import dev.patrickgold.florisboard.lib.FlorisLocale
 import dev.patrickgold.florisboard.lib.compose.LocalPreviewFieldController
 import dev.patrickgold.florisboard.lib.compose.PreviewKeyboardField
@@ -58,6 +63,8 @@ import dev.patrickgold.jetpref.datastore.ui.ProvideDefaultDialogPrefStrings
 import java.util.concurrent.atomic.AtomicBoolean
 import org.florisboard.lib.android.AndroidVersion
 import org.florisboard.lib.android.hideAppIcon
+import org.florisboard.lib.android.showLongToast
+import org.florisboard.lib.android.showShortToast
 import org.florisboard.lib.android.showAppIcon
 import org.florisboard.lib.compose.ProvideLocalizedResources
 import org.florisboard.lib.compose.conditional
@@ -80,6 +87,7 @@ class FlorisAppActivity : ComponentActivity() {
     private val prefs by FlorisPreferenceStore
     private val appContext by appContext()
     private val cacheManager by cacheManager()
+    private val lanClipboardSyncManager by lanClipboardSyncManager()
     private var appTheme by mutableStateOf(AppTheme.AUTO)
     private var showAppIcon = true
     private var resourcesContext by mutableStateOf(this as Context)
@@ -207,8 +215,12 @@ class FlorisAppActivity : ComponentActivity() {
         LaunchedEffect(intentToBeHandled) {
             val intent = intentToBeHandled
             if (intent != null) {
-                if (intent.action == Intent.ACTION_VIEW && intent.categories?.contains(Intent.CATEGORY_BROWSABLE) == true) {
-                    navController.handleDeepLink(intent)
+                if (isFlorisUiDeepLink(intent)) {
+                    applyLanClipboardPairingFromIntent(intent)
+                    val handled = navController.handleDeepLink(intent)
+                    if (!handled) {
+                        navController.navigate(Routes.Settings.Clipboard)
+                    }
                 } else {
                     val data = if (intent.action == Intent.ACTION_VIEW) {
                         intent.data!!
@@ -221,5 +233,36 @@ class FlorisAppActivity : ComponentActivity() {
             }
             intentToBeHandled = null
         }
+    }
+
+    private fun isFlorisUiDeepLink(intent: Intent): Boolean {
+        if (intent.action != Intent.ACTION_VIEW) {
+            return false
+        }
+        val data = intent.data ?: return false
+        return data.scheme == "ui" && data.host == "florisboard"
+    }
+
+    private suspend fun applyLanClipboardPairingFromIntent(intent: Intent) {
+        val data = intent.data ?: return
+        val pairingOffer = parseLanClipboardPairingOffer(data) ?: return
+        val deviceId = buildLanClipboardDeviceId(this)
+        val result = redeemLanClipboardPairingOffer(pairingOffer, deviceId)
+        result
+            .onSuccess { credentials ->
+                prefs.clipboard.lanSyncHost.set(credentials.host)
+                prefs.clipboard.lanSyncPort.set(credentials.port)
+                prefs.clipboard.lanSyncToken.set(credentials.token)
+                prefs.clipboard.lanSyncEndpointMode.set(LanClipboardEndpointMode.AUTO_DISCOVERY)
+                prefs.clipboard.lanSyncEnabled.set(true)
+                lanClipboardSyncManager.requestManualReconnect()
+                showShortToast(R.string.lan_clipboard__pairing__success)
+            }
+            .onFailure { error ->
+                showLongToast(
+                    R.string.lan_clipboard__pairing__failed,
+                    "reason" to (error.message ?: "Unknown error"),
+                )
+            }
     }
 }
