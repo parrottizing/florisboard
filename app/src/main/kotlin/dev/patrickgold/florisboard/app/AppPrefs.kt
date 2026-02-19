@@ -159,7 +159,7 @@ abstract class FlorisPreferenceModel : PreferenceModel() {
         )
         val lanSyncEnabled = boolean(
             key = "clipboard__lan_sync_enabled",
-            default = false,
+            default = true,
         )
         val lanSyncEndpointMode = enum(
             key = "clipboard__lan_sync_endpoint_mode",

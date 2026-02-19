@@ -764,6 +764,8 @@
     <string name="pref__clipboard__lan_sync_manual_reconnect__summary">Force a fresh connection attempt</string>
     <string name="pref__clipboard__lan_sync_discovered_endpoint__label">Discovered endpoint</string>
     <string name="pref__clipboard__lan_sync_selected_endpoint__label">Selected endpoint</string>
+    <string name="lan_clipboard__pairing__success">LAN bridge paired successfully</string>
+    <string name="lan_clipboard__pairing__failed">LAN pairing failed: {reason}</string>
     <string name="lan_clipboard__notification_channel__title">LAN clipboard sync</string>
     <string name="lan_clipboard__notification__title">LAN clipboard sync</string>
     <string name="lan_clipboard__notification__starting">Starting service…</string>
