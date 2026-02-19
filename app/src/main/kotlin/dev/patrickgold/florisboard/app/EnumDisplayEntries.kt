@@ -22,6 +22,7 @@ import dev.patrickgold.florisboard.app.settings.theme.DisplayKbdAfterDialogs
 import dev.patrickgold.florisboard.app.settings.theme.SnyggLevel
 import dev.patrickgold.florisboard.ime.clipboard.ClipboardSyncBehavior
 import dev.patrickgold.florisboard.ime.clipboard.lan.LanClipboardEndpointMode
+import dev.patrickgold.florisboard.ime.clipboard.lan.LanClipboardReliabilityMode
 import dev.patrickgold.florisboard.ime.core.DisplayLanguageNamesIn
 import dev.patrickgold.florisboard.ime.input.CapitalizationBehavior
 import dev.patrickgold.florisboard.ime.input.HapticVibrationMode
@@ -141,6 +142,20 @@ private val ENUM_DISPLAY_ENTRIES = mapOf<Pair<KClass<*>, String>, @Composable ()
                 key = LanClipboardEndpointMode.MANUAL,
                 label = stringRes(R.string.enum__lan_clipboard_endpoint_mode__manual),
                 description = stringRes(R.string.enum__lan_clipboard_endpoint_mode__manual__description),
+            )
+        }
+    },
+    LanClipboardReliabilityMode::class to DEFAULT to {
+        listPrefEntries {
+            entry(
+                key = LanClipboardReliabilityMode.MODE_B_ALWAYS_ON,
+                label = stringRes(R.string.enum__lan_clipboard_reliability_mode__mode_b_always_on),
+                description = stringRes(R.string.enum__lan_clipboard_reliability_mode__mode_b_always_on__description),
+            )
+            entry(
+                key = LanClipboardReliabilityMode.MODE_A_BEST_EFFORT,
+                label = stringRes(R.string.enum__lan_clipboard_reliability_mode__mode_a_best_effort),
+                description = stringRes(R.string.enum__lan_clipboard_reliability_mode__mode_a_best_effort__description),
             )
         }
     },

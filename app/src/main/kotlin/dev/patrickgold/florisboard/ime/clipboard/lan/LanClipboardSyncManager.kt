@@ -63,9 +63,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import org.florisboard.lib.android.AndroidKeyguardManager
 import org.florisboard.lib.android.systemService
-import org.florisboard.lib.android.systemServiceOrNull
 
 private const val HEARTBEAT_INTERVAL_MS = 15_000L
 private const val HEARTBEAT_TIMEOUT_MS = 45_000L
@@ -74,7 +72,6 @@ private const val BACKOFF_CAP_MS = 5_000L
 private const val MAX_TEXT_EVENT_CHARS = 262_144
 private const val STALE_EVENT_WINDOW_MS = 120_000L
 private const val DISCONNECTED_REASON_NETWORK_UNAVAILABLE = "No active network available"
-private const val DISCONNECTED_REASON_DEVICE_LOCKED = "Device is locked"
 private const val DISCONNECTED_REASON_MANUAL_HOST_MISSING = "Manual host is missing"
 
 class LanClipboardSyncManager(
@@ -85,7 +82,6 @@ class LanClipboardSyncManager(
     private val discovery = LanClipboardMdnsDiscovery(appContext)
     private val deviceId = buildLanClipboardDeviceId(appContext)
     private val connectivityManager = appContext.systemService(ConnectivityManager::class)
-    private val keyguardManager = appContext.systemServiceOrNull(AndroidKeyguardManager::class)
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var lifecycleJob: Job? = null
@@ -100,7 +96,6 @@ class LanClipboardSyncManager(
     private val runtimeStateFlow = MutableStateFlow(
         LanRuntimeState(
             networkAvailable = hasActiveNetworkConnection(),
-            deviceUnlocked = isDeviceUnlocked(),
         ),
     )
     private val pendingOutboundText = AtomicReference<PendingOutboundText?>(null)
@@ -123,13 +118,11 @@ class LanClipboardSyncManager(
 
     fun updateImeWindowVisibility(isVisible: Boolean) {
         if (isVisible) {
-            refreshDeviceUnlockedState()
             refreshNetworkAvailability()
         }
     }
 
     fun requestManualReconnect() {
-        refreshDeviceUnlockedState()
         refreshNetworkAvailability()
         manualReconnectSignal.update { it + 1L }
     }
@@ -190,7 +183,6 @@ class LanClipboardSyncManager(
                     token = token.trim(),
                     autoReconnect = true,
                     networkAvailable = true,
-                    deviceUnlocked = true,
                     reconnectGeneration = 0L,
                 )
             }
@@ -200,7 +192,6 @@ class LanClipboardSyncManager(
                 .combine(runtimeStateFlow) { partialConfig, runtimeState ->
                     partialConfig.copy(
                         networkAvailable = runtimeState.networkAvailable,
-                        deviceUnlocked = runtimeState.deviceUnlocked,
                     )
                 }
                 .combine(manualReconnectSignal) { partialConfig, reconnectGeneration ->
@@ -711,7 +702,6 @@ class LanClipboardSyncManager(
     }
 
     private fun registerRuntimeObservers() {
-        refreshDeviceUnlockedState()
         refreshNetworkAvailability()
         registerScreenStateReceiver()
         registerNetworkCallback()
@@ -729,7 +719,6 @@ class LanClipboardSyncManager(
                     Intent.ACTION_USER_PRESENT,
                     Intent.ACTION_USER_UNLOCKED,
                     -> {
-                        refreshDeviceUnlockedState()
                         refreshNetworkAvailability()
                     }
                 }
@@ -809,33 +798,16 @@ class LanClipboardSyncManager(
         }
     }
 
-    private fun refreshDeviceUnlockedState() {
-        val isUnlocked = isDeviceUnlocked()
-        runtimeStateFlow.update { state ->
-            if (state.deviceUnlocked == isUnlocked) {
-                state
-            } else {
-                state.copy(deviceUnlocked = isUnlocked)
-            }
-        }
-    }
-
     private fun hasActiveNetworkConnection(): Boolean {
         val activeNetwork = connectivityManager.activeNetwork ?: return false
         return connectivityManager.getNetworkCapabilities(activeNetwork) != null
     }
 
-    private fun isDeviceUnlocked(): Boolean {
-        val manager = keyguardManager ?: return true
-        return !manager.isDeviceLocked && !manager.isKeyguardLocked
-    }
-
     private fun disconnectedReason(config: LanRuntimeConfig): String? {
-        return when {
-            !config.deviceUnlocked -> DISCONNECTED_REASON_DEVICE_LOCKED
-            !config.networkAvailable -> DISCONNECTED_REASON_NETWORK_UNAVAILABLE
-            else -> null
-        }
+        return lanClipboardDisconnectedReason(
+            networkAvailable = config.networkAvailable,
+            deviceUnlocked = true,
+        )
     }
 
     private fun stopSession(resetDiscovery: Boolean) {
@@ -885,13 +857,11 @@ private data class LanRuntimeConfig(
     val token: String,
     val autoReconnect: Boolean,
     val networkAvailable: Boolean,
-    val deviceUnlocked: Boolean,
     val reconnectGeneration: Long,
 )
 
 private data class LanRuntimeState(
     val networkAvailable: Boolean,
-    val deviceUnlocked: Boolean,
 )
 
 private data class PendingOutboundText(
@@ -906,5 +876,17 @@ private data class SessionResult(
     companion object {
         fun retryable(message: String) = SessionResult(retryable = true, message = message)
         fun fatal(message: String) = SessionResult(retryable = false, message = message)
+    }
+}
+
+internal fun lanClipboardDisconnectedReason(
+    networkAvailable: Boolean,
+    @Suppress("UNUSED_PARAMETER")
+    deviceUnlocked: Boolean,
+): String? {
+    return if (!networkAvailable) {
+        DISCONNECTED_REASON_NETWORK_UNAVAILABLE
+    } else {
+        null
     }
 }

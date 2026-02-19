@@ -32,6 +32,7 @@ import dev.patrickgold.florisboard.ime.clipboard.CLIPBOARD_HISTORY_NUM_GRID_COLU
 import dev.patrickgold.florisboard.ime.clipboard.ClipboardSyncBehavior
 import dev.patrickgold.florisboard.ime.clipboard.lan.LanClipboardConnectionState
 import dev.patrickgold.florisboard.ime.clipboard.lan.LanClipboardEndpointMode
+import dev.patrickgold.florisboard.ime.clipboard.lan.LanClipboardReliabilityMode
 import dev.patrickgold.florisboard.lib.compose.FlorisScreen
 import dev.patrickgold.jetpref.datastore.model.collectAsState
 import dev.patrickgold.jetpref.datastore.ui.DialogSliderPreference
@@ -208,6 +209,12 @@ fun ClipboardScreen() = FlorisScreen {
                 prefs.clipboard.lanSyncEndpointMode,
                 title = stringRes(R.string.pref__clipboard__lan_sync_endpoint_mode__label),
                 entries = enumDisplayEntriesOf(LanClipboardEndpointMode::class),
+                enabledIf = { prefs.clipboard.lanSyncEnabled isEqualTo true },
+            )
+            ListPreference(
+                prefs.clipboard.lanSyncReliabilityMode,
+                title = stringRes(R.string.pref__clipboard__lan_sync_reliability_mode__label),
+                entries = enumDisplayEntriesOf(LanClipboardReliabilityMode::class),
                 enabledIf = { prefs.clipboard.lanSyncEnabled isEqualTo true },
             )
             Preference(

@@ -27,6 +27,7 @@ import dev.patrickgold.florisboard.ime.clipboard.CLIPBOARD_HISTORY_NUM_GRID_COLU
 import dev.patrickgold.florisboard.ime.clipboard.ClipboardSyncBehavior
 import dev.patrickgold.florisboard.ime.clipboard.lan.LAN_CLIPBOARD_DEFAULT_PORT
 import dev.patrickgold.florisboard.ime.clipboard.lan.LanClipboardEndpointMode
+import dev.patrickgold.florisboard.ime.clipboard.lan.LanClipboardReliabilityMode
 import dev.patrickgold.florisboard.ime.core.DisplayLanguageNamesIn
 import dev.patrickgold.florisboard.ime.core.Subtype
 import dev.patrickgold.florisboard.ime.input.CapitalizationBehavior
@@ -179,6 +180,10 @@ abstract class FlorisPreferenceModel : PreferenceModel() {
         val lanSyncAutoReconnect = boolean(
             key = "clipboard__lan_sync_auto_reconnect",
             default = true,
+        )
+        val lanSyncReliabilityMode = enum(
+            key = "clipboard__lan_sync_reliability_mode",
+            default = LanClipboardReliabilityMode.MODE_B_ALWAYS_ON,
         )
     }
 

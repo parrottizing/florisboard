@@ -28,6 +28,7 @@ import androidx.core.os.UserManagerCompat
 import dev.patrickgold.florisboard.app.FlorisPreferenceModel
 import dev.patrickgold.florisboard.app.FlorisPreferenceStore
 import dev.patrickgold.florisboard.ime.clipboard.ClipboardManager
+import dev.patrickgold.florisboard.ime.clipboard.lan.LanClipboardForegroundController
 import dev.patrickgold.florisboard.ime.clipboard.lan.LanClipboardSyncManager
 import dev.patrickgold.florisboard.ime.core.SubtypeManager
 import dev.patrickgold.florisboard.ime.dictionary.DictionaryManager
@@ -46,7 +47,11 @@ import dev.patrickgold.florisboard.lib.ext.ExtensionManager
 import dev.patrickgold.jetpref.datastore.runtime.initAndroid
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import org.florisboard.lib.kotlin.io.deleteContentsRecursively
 import org.florisboard.lib.kotlin.tryOrNull
@@ -71,7 +76,9 @@ class FlorisApplication : Application() {
     }
 
     private val mainHandler by lazy { Handler(mainLooper) }
+    private val prefs by FlorisPreferenceStore
     private val scope = CoroutineScope(Dispatchers.Default)
+    private var lanClipboardForegroundControllerJob: Job? = null
     val preferenceStoreLoaded = MutableStateFlow(false)
 
     val cacheManager = lazy { CacheManager(this) }
@@ -124,6 +131,19 @@ class FlorisApplication : Application() {
             Log.i("PREFS", result.toString())
             preferenceStoreLoaded.value = true
             lanClipboardSyncManager.value.initialize()
+            lanClipboardForegroundControllerJob?.cancel()
+            lanClipboardForegroundControllerJob = launch {
+                combine(
+                    prefs.clipboard.lanSyncEnabled.asFlow(),
+                    prefs.clipboard.lanSyncReliabilityMode.asFlow(),
+                ) { isEnabled, reliabilityMode ->
+                    isEnabled to reliabilityMode
+                }
+                    .distinctUntilChanged()
+                    .collectLatest {
+                        LanClipboardForegroundController.syncWithPrefs(this@FlorisApplication)
+                    }
+            }
         }
         extensionManager.value.init()
         clipboardManager.value.initializeForContext(this)
