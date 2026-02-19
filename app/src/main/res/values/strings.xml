@@ -752,11 +752,15 @@
     <string name="pref__clipboard__lan_sync_auto_reconnect__summary">Retry connection with exponential backoff after disconnects</string>
     <string name="pref__clipboard__lan_sync_connection_status__label">Connection status</string>
     <string name="pref__clipboard__lan_sync_status__disabled">Disabled</string>
+    <string name="pref__clipboard__lan_sync_status__disconnected">Disconnected</string>
+    <string name="pref__clipboard__lan_sync_status__disconnected_with_reason">Disconnected: {reason}</string>
     <string name="pref__clipboard__lan_sync_status__discovering">Discovering LAN bridge…</string>
     <string name="pref__clipboard__lan_sync_status__connecting">Connecting to {endpoint}…</string>
     <string name="pref__clipboard__lan_sync_status__connected">Connected to {endpoint}</string>
     <string name="pref__clipboard__lan_sync_status__reconnecting">Reconnecting (attempt {attempt})…</string>
     <string name="pref__clipboard__lan_sync_status__error">Connection error</string>
+    <string name="pref__clipboard__lan_sync_manual_reconnect__label">Reconnect now</string>
+    <string name="pref__clipboard__lan_sync_manual_reconnect__summary">Force a fresh connection attempt</string>
     <string name="pref__clipboard__lan_sync_discovered_endpoint__label">Discovered endpoint</string>
     <string name="pref__clipboard__lan_sync_selected_endpoint__label">Selected endpoint</string>
     <string name="send_to_clipboard__unknown_error">An unknown error occurred. Please try again!</string>

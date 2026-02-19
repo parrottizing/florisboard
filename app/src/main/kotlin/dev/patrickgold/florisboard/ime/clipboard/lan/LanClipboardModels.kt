@@ -18,6 +18,7 @@ package dev.patrickgold.florisboard.ime.clipboard.lan
 
 enum class LanClipboardConnectionState {
     DISABLED,
+    DISCONNECTED,
     DISCOVERING,
     CONNECTING,
     CONNECTED,
@@ -61,4 +62,3 @@ data class LanClipboardEndpoint(
 
     fun displayAddress(): String = "$host:$port"
 }
-
