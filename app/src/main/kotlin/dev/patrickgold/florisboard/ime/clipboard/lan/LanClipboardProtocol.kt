@@ -38,6 +38,10 @@ const val LAN_CLIPBOARD_SOURCE_MAC = "mac"
 const val LAN_CLIPBOARD_DEFAULT_PATH = "/v1/clipboard"
 const val LAN_CLIPBOARD_DEFAULT_PORT = 8765
 const val LAN_CLIPBOARD_MDNS_SERVICE_TYPE = "_gumlet-clipboard._tcp"
+const val LAN_CLIPBOARD_MAX_IMAGE_BYTE_SIZE = 10 * 1024 * 1024
+const val LAN_CLIPBOARD_MAX_IMAGE_BASE64_CHARS = 13_981_016
+val LAN_CLIPBOARD_ALLOWED_IMAGE_MIME_TYPES = setOf("image/png", "image/jpeg", "image/webp")
+val LAN_CLIPBOARD_ALLOWED_IMAGE_ORIENTATIONS = setOf(0, 90, 180, 270)
 private val PROTOCOL_VERSION_PATTERN = Regex("^\\d+\\.\\d+$")
 
 private val compactJson = Json {
@@ -59,6 +63,14 @@ object LanClipboardProtocol {
 
     fun isSupportedSource(source: String?): Boolean {
         return source == LAN_CLIPBOARD_SOURCE_ANDROID || source == LAN_CLIPBOARD_SOURCE_MAC
+    }
+
+    fun isSupportedImageMimeType(mimeType: String?): Boolean {
+        return mimeType != null && LAN_CLIPBOARD_ALLOWED_IMAGE_MIME_TYPES.contains(mimeType.lowercase())
+    }
+
+    fun isSupportedImageOrientation(orientation: Int?): Boolean {
+        return orientation != null && LAN_CLIPBOARD_ALLOWED_IMAGE_ORIENTATIONS.contains(orientation)
     }
 
     fun buildPingEvent(deviceId: String): String {
@@ -96,6 +108,30 @@ object LanClipboardProtocol {
         return buildEvent(
             deviceId = deviceId,
             eventType = "set_text",
+            payload = payload,
+        )
+    }
+
+    fun buildSetImageEvent(
+        deviceId: String,
+        mimeType: String,
+        byteSize: Int,
+        dataBase64: String,
+        width: Int,
+        height: Int,
+        orientation: Int,
+    ): String {
+        val payload = buildJsonObject {
+            put("mime_type", JsonPrimitive(mimeType))
+            put("byte_size", JsonPrimitive(byteSize))
+            put("data_base64", JsonPrimitive(dataBase64))
+            put("width", JsonPrimitive(width))
+            put("height", JsonPrimitive(height))
+            put("orientation", JsonPrimitive(orientation))
+        }
+        return buildEvent(
+            deviceId = deviceId,
+            eventType = "set_image",
             payload = payload,
         )
     }

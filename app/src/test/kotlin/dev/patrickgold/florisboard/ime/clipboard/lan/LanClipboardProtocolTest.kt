@@ -19,6 +19,7 @@ package dev.patrickgold.florisboard.ime.clipboard.lan
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
+import java.util.Base64
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -48,6 +49,37 @@ class LanClipboardProtocolTest : FunSpec({
         nonNullPayload["mime_type"]?.jsonPrimitive?.contentOrNull shouldBe "text/plain"
         nonNullPayload["text"]?.jsonPrimitive?.contentOrNull shouldBe "phase-4 clipboard text"
         nonNullPayload["is_sensitive"]?.jsonPrimitive?.contentOrNull shouldBe "true"
+
+        val payloadHash = nonNullEnvelope["payload_hash"]?.jsonPrimitive?.contentOrNull
+        payloadHash shouldBe LanClipboardProtocol.computePayloadHash(nonNullPayload)
+    }
+
+    test("buildSetImageEvent creates protocol-compliant envelope") {
+        val imageBytes = "phase-7-image".toByteArray(Charsets.UTF_8)
+        val imageBase64 = Base64.getEncoder().encodeToString(imageBytes)
+        val eventJson = LanClipboardProtocol.buildSetImageEvent(
+            deviceId = "android.pixel.test",
+            mimeType = "image/png",
+            byteSize = imageBytes.size,
+            dataBase64 = imageBase64,
+            width = 640,
+            height = 480,
+            orientation = 90,
+        )
+        val envelope = LanClipboardProtocol.parseEnvelope(eventJson)
+
+        envelope shouldNotBe null
+        val nonNullEnvelope = envelope!!
+        nonNullEnvelope["event_type"]?.jsonPrimitive?.contentOrNull shouldBe "set_image"
+        val payload = LanClipboardProtocol.payloadOrNull(nonNullEnvelope)
+        payload shouldNotBe null
+        val nonNullPayload = payload!!
+        nonNullPayload["mime_type"]?.jsonPrimitive?.contentOrNull shouldBe "image/png"
+        nonNullPayload["byte_size"]?.jsonPrimitive?.contentOrNull shouldBe imageBytes.size.toString()
+        nonNullPayload["data_base64"]?.jsonPrimitive?.contentOrNull shouldBe imageBase64
+        nonNullPayload["width"]?.jsonPrimitive?.contentOrNull shouldBe "640"
+        nonNullPayload["height"]?.jsonPrimitive?.contentOrNull shouldBe "480"
+        nonNullPayload["orientation"]?.jsonPrimitive?.contentOrNull shouldBe "90"
 
         val payloadHash = nonNullEnvelope["payload_hash"]?.jsonPrimitive?.contentOrNull
         payloadHash shouldBe LanClipboardProtocol.computePayloadHash(nonNullPayload)
@@ -97,6 +129,21 @@ class LanClipboardProtocolTest : FunSpec({
         LanClipboardProtocol.isSupportedSource("ios") shouldBe false
         LanClipboardProtocol.isSupportedSource("") shouldBe false
         LanClipboardProtocol.isSupportedSource(null) shouldBe false
+    }
+
+    test("image payload helpers enforce whitelist constraints") {
+        LanClipboardProtocol.isSupportedImageMimeType("image/png") shouldBe true
+        LanClipboardProtocol.isSupportedImageMimeType("image/jpeg") shouldBe true
+        LanClipboardProtocol.isSupportedImageMimeType("image/webp") shouldBe true
+        LanClipboardProtocol.isSupportedImageMimeType("image/gif") shouldBe false
+        LanClipboardProtocol.isSupportedImageMimeType(null) shouldBe false
+
+        LanClipboardProtocol.isSupportedImageOrientation(0) shouldBe true
+        LanClipboardProtocol.isSupportedImageOrientation(90) shouldBe true
+        LanClipboardProtocol.isSupportedImageOrientation(180) shouldBe true
+        LanClipboardProtocol.isSupportedImageOrientation(270) shouldBe true
+        LanClipboardProtocol.isSupportedImageOrientation(45) shouldBe false
+        LanClipboardProtocol.isSupportedImageOrientation(null) shouldBe false
     }
 
     test("buildAckEvent includes status and optional error code") {

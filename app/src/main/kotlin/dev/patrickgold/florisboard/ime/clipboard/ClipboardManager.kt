@@ -17,7 +17,11 @@
 package dev.patrickgold.florisboard.ime.clipboard
 
 import android.content.ClipData
+import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
 import dev.patrickgold.florisboard.app.FlorisPreferenceStore
 import dev.patrickgold.florisboard.appContext
 import dev.patrickgold.florisboard.editorInstance
@@ -25,8 +29,10 @@ import dev.patrickgold.florisboard.lanClipboardSyncManager
 import dev.patrickgold.florisboard.ime.clipboard.provider.ClipboardHistoryDao
 import dev.patrickgold.florisboard.ime.clipboard.provider.ClipboardHistoryDatabase
 import dev.patrickgold.florisboard.ime.clipboard.provider.ClipboardItem
+import dev.patrickgold.florisboard.ime.clipboard.provider.ClipboardMediaProvider
 import dev.patrickgold.florisboard.ime.clipboard.provider.ItemType
 import java.io.Closeable
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -120,6 +126,15 @@ class ClipboardManager(
         systemClipboardManager.addPrimaryClipChangedListener(this)
         lanClipboardSyncManager.setInboundTextHandler { text, isSensitive ->
             applyInboundLanText(text, isSensitive)
+        }
+        lanClipboardSyncManager.setInboundImageHandler { mimeType, imageBytes, width, height, orientation ->
+            applyInboundLanImage(
+                mimeType = mimeType,
+                imageBytes = imageBytes,
+                width = width,
+                height = height,
+                orientation = orientation,
+            )
         }
         cleanUpJob = ioScope.launch {
             while (isActive) {
@@ -245,6 +260,69 @@ class ClipboardManager(
                 ),
             )
             true
+        }.getOrElse {
+            false
+        }
+    }
+
+    private fun applyInboundLanImage(
+        mimeType: String,
+        imageBytes: ByteArray,
+        width: Int,
+        height: Int,
+        orientation: Int,
+    ): Boolean {
+        val normalizedMimeType = when (mimeType.lowercase()) {
+            "image/png" -> "image/png"
+            "image/jpeg", "image/jpg" -> "image/jpeg"
+            "image/webp" -> "image/webp"
+            else -> return false
+        }
+        if (imageBytes.isEmpty() || width <= 0 || height <= 0 || orientation !in listOf(0, 90, 180, 270)) {
+            return false
+        }
+        val fileExtension = when (normalizedMimeType) {
+            "image/png" -> ".png"
+            "image/jpeg" -> ".jpg"
+            "image/webp" -> ".webp"
+            else -> ".img"
+        }
+        return runCatching {
+            val tempFile = File(appContext.cacheDir, "lan_clipboard_${System.nanoTime()}$fileExtension")
+            try {
+                tempFile.outputStream().use { output ->
+                    output.write(imageBytes)
+                }
+                val sourceUri = Uri.fromFile(tempFile)
+                val values = ContentValues(3).apply {
+                    put(OpenableColumns.DISPLAY_NAME, "LAN Clipboard Image $width x $height$fileExtension")
+                    put(ClipboardMediaProvider.Columns.MediaUri, sourceUri.toString())
+                    put(ClipboardMediaProvider.Columns.MimeTypes, normalizedMimeType)
+                }
+                val insertedUri = appContext.contentResolver.insert(
+                    ClipboardMediaProvider.IMAGE_CLIPS_URI,
+                    values,
+                )
+                val insertedId = insertedUri?.let { runCatching { ContentUris.parseId(it) }.getOrNull() } ?: 0L
+                if (insertedId <= 0L || insertedUri == null) {
+                    return@runCatching false
+                }
+                addNewClip(
+                    ClipboardItem(
+                        type = ItemType.IMAGE,
+                        text = null,
+                        uri = insertedUri,
+                        creationTimestampMs = System.currentTimeMillis(),
+                        isPinned = false,
+                        mimeTypes = listOf(normalizedMimeType),
+                        isSensitive = false,
+                        isRemoteDevice = true,
+                    ),
+                )
+                true
+            } finally {
+                tempFile.delete()
+            }
         }.getOrElse {
             false
         }
@@ -435,6 +513,7 @@ class ClipboardManager(
     override fun close() {
         systemClipboardManager.removePrimaryClipChangedListener(this)
         lanClipboardSyncManager.setInboundTextHandler(null)
+        lanClipboardSyncManager.setInboundImageHandler(null)
         cleanUpJob.cancel()
     }
 }
