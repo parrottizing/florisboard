@@ -79,11 +79,12 @@ private const val HEARTBEAT_TIMEOUT_MS = 45_000L
 private const val BACKOFF_BASE_MS = 250L
 private const val BACKOFF_CAP_MS = 5_000L
 private const val MAX_TEXT_EVENT_CHARS = 262_144
-private const val MAX_IMAGE_READ_BYTES = 32 * 1024 * 1024
+private const val MAX_IMAGE_READ_BYTES = 64 * 1024 * 1024
 private const val STALE_EVENT_WINDOW_MS = 120_000L
 private const val DISCONNECTED_REASON_NETWORK_UNAVAILABLE = "No active network available"
 private const val DISCONNECTED_REASON_MANUAL_HOST_MISSING = "Manual host is missing"
-private val IMAGE_COMPRESSION_QUALITY_STEPS = intArrayOf(95, 90, 85, 80, 75, 70, 65, 60, 55)
+private val IMAGE_COMPRESSION_QUALITY_STEPS = intArrayOf(95, 90, 85, 80, 75, 70, 65, 60, 55, 50, 45, 40, 35)
+private val IMAGE_MAX_DIMENSION_STEPS = intArrayOf(4096, 3072, 2560, 2048, 1600, 1280, 1024)
 private val WEBP_LOSSY_COMPRESS_FORMAT = runCatching { Bitmap.CompressFormat.valueOf("WEBP_LOSSY") }.getOrNull()
 private val WEBP_COMPRESS_FORMAT = runCatching { Bitmap.CompressFormat.valueOf("WEBP") }.getOrNull()
 
@@ -1089,25 +1090,48 @@ class LanClipboardSyncManager(
         if (rawImageBytes.isEmpty()) {
             return null
         }
-        val imageBounds = decodeImageBounds(rawImageBytes) ?: return null
+        val imageInfo = decodeImageInfo(rawImageBytes) ?: return null
         val orientation = readExifOrientationDegrees(rawImageBytes)
         val explicitMimeType = item.mimeTypes.firstOrNull { LanClipboardProtocol.isSupportedImageMimeType(it) }
         val normalizedMimeType = normalizeImageMimeType(
             explicitMimeType ?: appContext.contentResolver.getType(uri),
-        )
+        ) ?: normalizeImageMimeType(imageInfo.mimeType)
 
         if (normalizedMimeType != null && rawImageBytes.size <= LAN_CLIPBOARD_MAX_IMAGE_BYTE_SIZE) {
             return buildImagePendingEvent(
                 mimeType = normalizedMimeType,
                 imageBytes = rawImageBytes,
-                width = imageBounds.first,
-                height = imageBounds.second,
+                width = imageInfo.width,
+                height = imageInfo.height,
                 orientation = orientation,
             )
         }
 
-        val decodedBitmap = BitmapFactory.decodeByteArray(rawImageBytes, 0, rawImageBytes.size) ?: return null
+        val decodedBitmap = decodeBitmapForCompression(rawImageBytes) ?: return null
         return compressBitmapToPendingEvent(decodedBitmap, orientation)
+    }
+
+    private data class DecodedImageInfo(
+        val width: Int,
+        val height: Int,
+        val mimeType: String?,
+    )
+
+    private fun decodeImageInfo(imageBytes: ByteArray): DecodedImageInfo? {
+        val options = BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+        BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size, options)
+        val width = options.outWidth
+        val height = options.outHeight
+        if (width <= 0 || height <= 0) {
+            return null
+        }
+        return DecodedImageInfo(
+            width = width,
+            height = height,
+            mimeType = options.outMimeType,
+        )
     }
 
     private fun readUriBytes(uri: Uri, maxBytes: Int): ByteArray? {
@@ -1132,17 +1156,25 @@ class LanClipboardSyncManager(
     }
 
     private fun decodeImageBounds(imageBytes: ByteArray): Pair<Int, Int>? {
-        val options = BitmapFactory.Options().apply {
-            inJustDecodeBounds = true
+        val imageInfo = decodeImageInfo(imageBytes) ?: return null
+        return imageInfo.width to imageInfo.height
+    }
+
+    private fun decodeBitmapForCompression(imageBytes: ByteArray): Bitmap? {
+        var sampleSize = 1
+        while (sampleSize <= 16) {
+            val options = BitmapFactory.Options().apply {
+                inSampleSize = sampleSize
+            }
+            val bitmap = runCatching {
+                BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size, options)
+            }.getOrNull()
+            if (bitmap != null) {
+                return bitmap
+            }
+            sampleSize *= 2
         }
-        BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size, options)
-        val width = options.outWidth
-        val height = options.outHeight
-        return if (width > 0 && height > 0) {
-            width to height
-        } else {
-            null
-        }
+        return null
     }
 
     private fun readExifOrientationDegrees(imageBytes: ByteArray): Int {
@@ -1190,46 +1222,64 @@ class LanClipboardSyncManager(
             }
         }
         return try {
-            val width = workingBitmap.width
-            val height = workingBitmap.height
-            if (workingBitmap.hasAlpha()) {
-                val pngBytes = encodeBitmap(workingBitmap, Bitmap.CompressFormat.PNG, 100)
-                if (pngBytes != null && pngBytes.size <= LAN_CLIPBOARD_MAX_IMAGE_BYTE_SIZE) {
-                    return buildImagePendingEvent(
-                        mimeType = "image/png",
-                        imageBytes = pngBytes,
-                        width = width,
-                        height = height,
-                        orientation = normalizedOrientation,
-                    )
-                }
-            }
+            val sourceMaxDimension = maxOf(workingBitmap.width, workingBitmap.height)
+            val maxDimensionAttempts = buildList {
+                add(sourceMaxDimension)
+                IMAGE_MAX_DIMENSION_STEPS
+                    .filter { it < sourceMaxDimension }
+                    .forEach { add(it) }
+            }.distinct()
 
-            for (quality in IMAGE_COMPRESSION_QUALITY_STEPS) {
-                val jpegBytes = encodeBitmap(workingBitmap, Bitmap.CompressFormat.JPEG, quality)
-                if (jpegBytes != null && jpegBytes.size <= LAN_CLIPBOARD_MAX_IMAGE_BYTE_SIZE) {
-                    return buildImagePendingEvent(
-                        mimeType = "image/jpeg",
-                        imageBytes = jpegBytes,
-                        width = width,
-                        height = height,
-                        orientation = normalizedOrientation,
-                    )
-                }
-            }
+            for (maxDimension in maxDimensionAttempts) {
+                val candidateBitmap = maybeScaleDownBitmap(workingBitmap, maxDimension) ?: continue
+                try {
+                    val width = candidateBitmap.width
+                    val height = candidateBitmap.height
 
-            val webpFormat = WEBP_LOSSY_COMPRESS_FORMAT ?: WEBP_COMPRESS_FORMAT
-            if (webpFormat != null) {
-                for (quality in IMAGE_COMPRESSION_QUALITY_STEPS) {
-                    val webpBytes = encodeBitmap(workingBitmap, webpFormat, quality)
-                    if (webpBytes != null && webpBytes.size <= LAN_CLIPBOARD_MAX_IMAGE_BYTE_SIZE) {
-                        return buildImagePendingEvent(
-                            mimeType = "image/webp",
-                            imageBytes = webpBytes,
-                            width = width,
-                            height = height,
-                            orientation = normalizedOrientation,
-                        )
+                    if (candidateBitmap.hasAlpha()) {
+                        val pngBytes = encodeBitmap(candidateBitmap, Bitmap.CompressFormat.PNG, 100)
+                        if (pngBytes != null && pngBytes.size <= LAN_CLIPBOARD_MAX_IMAGE_BYTE_SIZE) {
+                            return buildImagePendingEvent(
+                                mimeType = "image/png",
+                                imageBytes = pngBytes,
+                                width = width,
+                                height = height,
+                                orientation = normalizedOrientation,
+                            )
+                        }
+                    }
+
+                    for (quality in IMAGE_COMPRESSION_QUALITY_STEPS) {
+                        val jpegBytes = encodeBitmap(candidateBitmap, Bitmap.CompressFormat.JPEG, quality)
+                        if (jpegBytes != null && jpegBytes.size <= LAN_CLIPBOARD_MAX_IMAGE_BYTE_SIZE) {
+                            return buildImagePendingEvent(
+                                mimeType = "image/jpeg",
+                                imageBytes = jpegBytes,
+                                width = width,
+                                height = height,
+                                orientation = normalizedOrientation,
+                            )
+                        }
+                    }
+
+                    val webpFormat = WEBP_LOSSY_COMPRESS_FORMAT ?: WEBP_COMPRESS_FORMAT
+                    if (webpFormat != null) {
+                        for (quality in IMAGE_COMPRESSION_QUALITY_STEPS) {
+                            val webpBytes = encodeBitmap(candidateBitmap, webpFormat, quality)
+                            if (webpBytes != null && webpBytes.size <= LAN_CLIPBOARD_MAX_IMAGE_BYTE_SIZE) {
+                                return buildImagePendingEvent(
+                                    mimeType = "image/webp",
+                                    imageBytes = webpBytes,
+                                    width = width,
+                                    height = height,
+                                    orientation = normalizedOrientation,
+                                )
+                            }
+                        }
+                    }
+                } finally {
+                    if (candidateBitmap !== workingBitmap) {
+                        candidateBitmap.recycle()
                     }
                 }
             }
@@ -1237,6 +1287,24 @@ class LanClipboardSyncManager(
         } finally {
             workingBitmap.recycle()
         }
+    }
+
+    private fun maybeScaleDownBitmap(bitmap: Bitmap, maxDimension: Int): Bitmap? {
+        val srcWidth = bitmap.width
+        val srcHeight = bitmap.height
+        val srcMaxDimension = maxOf(srcWidth, srcHeight)
+        if (maxDimension <= 0 || srcMaxDimension <= maxDimension) {
+            return bitmap
+        }
+        val scale = maxDimension.toDouble() / srcMaxDimension.toDouble()
+        val targetWidth = (srcWidth * scale).toInt().coerceAtLeast(1)
+        val targetHeight = (srcHeight * scale).toInt().coerceAtLeast(1)
+        if (targetWidth == srcWidth && targetHeight == srcHeight) {
+            return bitmap
+        }
+        return runCatching {
+            Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true)
+        }.getOrNull()
     }
 
     private fun rotateBitmap(bitmap: Bitmap, degrees: Int): Bitmap {

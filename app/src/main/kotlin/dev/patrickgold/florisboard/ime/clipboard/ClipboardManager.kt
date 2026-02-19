@@ -225,10 +225,24 @@ class ClipboardManager(
 
                 val isEqual = internalPrimaryClip?.isEqualTo(systemPrimaryClip) == true
                 if (!isEqual) {
-                    val item = ClipboardItem.fromClipData(appContext, systemPrimaryClip, cloneUri = true)
-                    primaryClip = item
-                    insertOrMoveBeginning(item)
-                    lanClipboardSyncManager.submitOutboundPrimaryClip(item)
+                    // Build an outbound view without URI cloning first so LAN sync can start immediately.
+                    val outboundCandidate = ClipboardItem.fromClipData(
+                        appContext,
+                        systemPrimaryClip,
+                        cloneUri = false,
+                    )
+                    lanClipboardSyncManager.submitOutboundPrimaryClip(outboundCandidate)
+
+                    val historyItem = when (outboundCandidate.type) {
+                        ItemType.TEXT -> outboundCandidate
+                        ItemType.IMAGE, ItemType.VIDEO -> ClipboardItem.fromClipData(
+                            appContext,
+                            systemPrimaryClip,
+                            cloneUri = true,
+                        )
+                    }
+                    primaryClip = historyItem
+                    insertOrMoveBeginning(historyItem)
                 }
             }
         }
