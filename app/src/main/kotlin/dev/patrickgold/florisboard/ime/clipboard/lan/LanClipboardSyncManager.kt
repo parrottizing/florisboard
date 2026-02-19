@@ -16,7 +16,14 @@
 
 package dev.patrickgold.florisboard.ime.clipboard.lan
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.os.Build
 import dev.patrickgold.florisboard.app.FlorisPreferenceStore
 import dev.patrickgold.florisboard.ime.clipboard.provider.ClipboardItem
 import dev.patrickgold.florisboard.ime.clipboard.provider.ItemType
@@ -39,6 +46,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -54,6 +62,9 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import org.florisboard.lib.android.AndroidKeyguardManager
+import org.florisboard.lib.android.systemService
+import org.florisboard.lib.android.systemServiceOrNull
 
 private const val HEARTBEAT_INTERVAL_MS = 15_000L
 private const val HEARTBEAT_TIMEOUT_MS = 45_000L
@@ -61,6 +72,10 @@ private const val BACKOFF_BASE_MS = 250L
 private const val BACKOFF_CAP_MS = 5_000L
 private const val MAX_TEXT_EVENT_CHARS = 262_144
 private const val STALE_EVENT_WINDOW_MS = 120_000L
+private const val DISCONNECTED_REASON_IME_HIDDEN = "Open FlorisBoard keyboard to reconnect"
+private const val DISCONNECTED_REASON_NETWORK_UNAVAILABLE = "No active network available"
+private const val DISCONNECTED_REASON_DEVICE_LOCKED = "Device is locked"
+private const val DISCONNECTED_REASON_MANUAL_HOST_MISSING = "Manual host is missing"
 
 class LanClipboardSyncManager(
     context: Context,
@@ -69,15 +84,31 @@ class LanClipboardSyncManager(
     private val appContext = context.applicationContext
     private val discovery = LanClipboardMdnsDiscovery(appContext)
     private val deviceId = buildLanClipboardDeviceId(appContext)
+    private val connectivityManager = appContext.systemService(ConnectivityManager::class)
+    private val keyguardManager = appContext.systemServiceOrNull(AndroidKeyguardManager::class)
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var lifecycleJob: Job? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var screenStateReceiver: BroadcastReceiver? = null
     private val wsClient = OkHttpClient.Builder()
         .retryOnConnectionFailure(true)
         .pingInterval(20, TimeUnit.SECONDS)
         .build()
     @Volatile
     private var activeWebSocket: WebSocket? = null
+    private val runtimeStateFlow = MutableStateFlow(
+        LanRuntimeState(
+            imeWindowVisible = false,
+            networkAvailable = hasActiveNetworkConnection(),
+            deviceUnlocked = isDeviceUnlocked(),
+        ),
+    )
+    private val manualReconnectSignal = MutableStateFlow(0L)
+    @Volatile
+    private var lastProcessedManualReconnectGeneration = 0L
+    @Volatile
+    private var lastObservedLanEnabledState = prefs.clipboard.lanSyncEnabled.get()
 
     private val _connectionStatusFlow = MutableStateFlow(LanClipboardConnectionStatus.Disabled)
     val connectionStatusFlow: StateFlow<LanClipboardConnectionStatus> = _connectionStatusFlow.asStateFlow()
@@ -92,6 +123,26 @@ class LanClipboardSyncManager(
 
     fun setInboundTextHandler(handler: ((text: String, isSensitive: Boolean) -> Boolean)?) {
         inboundTextHandler = handler
+    }
+
+    fun updateImeWindowVisibility(isVisible: Boolean) {
+        runtimeStateFlow.update { state ->
+            if (state.imeWindowVisible == isVisible) {
+                state
+            } else {
+                state.copy(imeWindowVisible = isVisible)
+            }
+        }
+        if (isVisible) {
+            refreshDeviceUnlockedState()
+            refreshNetworkAvailability()
+        }
+    }
+
+    fun requestManualReconnect() {
+        refreshDeviceUnlockedState()
+        refreshNetworkAvailability()
+        manualReconnectSignal.update { it + 1L }
     }
 
     fun submitOutboundPrimaryClip(item: ClipboardItem?) {
@@ -130,6 +181,7 @@ class LanClipboardSyncManager(
         if (lifecycleJob != null) {
             return
         }
+        registerRuntimeObservers()
         lifecycleJob = scope.launch {
             combine(
                 prefs.clipboard.lanSyncEnabled.asFlow(),
@@ -145,10 +197,24 @@ class LanClipboardSyncManager(
                     port = port.coerceIn(1, 65535),
                     token = token.trim(),
                     autoReconnect = true,
+                    imeWindowVisible = false,
+                    networkAvailable = true,
+                    deviceUnlocked = true,
+                    reconnectGeneration = 0L,
                 )
             }
                 .combine(prefs.clipboard.lanSyncAutoReconnect.asFlow()) { partialConfig, autoReconnect ->
                     partialConfig.copy(autoReconnect = autoReconnect)
+                }
+                .combine(runtimeStateFlow) { partialConfig, runtimeState ->
+                    partialConfig.copy(
+                        imeWindowVisible = runtimeState.imeWindowVisible,
+                        networkAvailable = runtimeState.networkAvailable,
+                        deviceUnlocked = runtimeState.deviceUnlocked,
+                    )
+                }
+                .combine(manualReconnectSignal) { partialConfig, reconnectGeneration ->
+                    partialConfig.copy(reconnectGeneration = reconnectGeneration)
                 }
                 .distinctUntilChanged()
                 .collectLatest { config ->
@@ -158,20 +224,15 @@ class LanClipboardSyncManager(
     }
 
     private suspend fun runSessionLifecycle(config: LanRuntimeConfig) {
+        val isEnableTransition = consumeEnableTransition(config.isEnabled)
         if (!config.isEnabled) {
-            discovery.stop(resetError = true)
-            activeWebSocket?.cancel()
-            activeWebSocket = null
-            _activeEndpointFlow.value = null
+            stopSession(resetDiscovery = true)
             _connectionStatusFlow.value = LanClipboardConnectionStatus.Disabled
             return
         }
 
         if (config.token.isBlank()) {
-            discovery.stop(resetError = true)
-            activeWebSocket?.cancel()
-            activeWebSocket = null
-            _activeEndpointFlow.value = null
+            stopSession(resetDiscovery = true)
             _connectionStatusFlow.value = LanClipboardConnectionStatus(
                 state = LanClipboardConnectionState.ERROR,
                 message = "Pairing token is missing",
@@ -179,12 +240,27 @@ class LanClipboardSyncManager(
             return
         }
 
+        val allowImeHiddenBypass = shouldBypassImeVisibilityGate(
+            config = config,
+            isEnableTransition = isEnableTransition,
+        )
+        val disconnectedReason = disconnectedReason(
+            config = config,
+            allowImeHiddenBypass = allowImeHiddenBypass,
+        )
+        if (disconnectedReason != null) {
+            stopSession(resetDiscovery = true)
+            _connectionStatusFlow.value = LanClipboardConnectionStatus(
+                state = LanClipboardConnectionState.DISCONNECTED,
+                message = disconnectedReason,
+            )
+            return
+        }
+
         if (config.endpointMode == LanClipboardEndpointMode.AUTO_DISCOVERY) {
             val discoveryStarted = discovery.start()
             if (!discoveryStarted && config.host.isBlank()) {
-                activeWebSocket?.cancel()
-                activeWebSocket = null
-                _activeEndpointFlow.value = null
+                stopSession(resetDiscovery = true)
                 _connectionStatusFlow.value = LanClipboardConnectionStatus(
                     state = LanClipboardConnectionState.ERROR,
                     message = discovery.lastErrorFlow.value ?: "Failed to start mDNS discovery",
@@ -199,6 +275,14 @@ class LanClipboardSyncManager(
         while (currentCoroutineContext().isActive) {
             val endpoint = selectEndpoint(config)
             if (endpoint == null) {
+                if (config.endpointMode == LanClipboardEndpointMode.MANUAL) {
+                    _activeEndpointFlow.value = null
+                    _connectionStatusFlow.value = LanClipboardConnectionStatus(
+                        state = LanClipboardConnectionState.DISCONNECTED,
+                        message = DISCONNECTED_REASON_MANUAL_HOST_MISSING,
+                    )
+                    return
+                }
                 val discoveryError = if (config.endpointMode == LanClipboardEndpointMode.AUTO_DISCOVERY) {
                     discovery.lastErrorFlow.value
                 } else {
@@ -610,6 +694,167 @@ class LanClipboardSyncManager(
         )
     }
 
+    private fun registerRuntimeObservers() {
+        refreshDeviceUnlockedState()
+        refreshNetworkAvailability()
+        registerScreenStateReceiver()
+        registerNetworkCallback()
+    }
+
+    private fun registerScreenStateReceiver() {
+        if (screenStateReceiver != null) {
+            return
+        }
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    Intent.ACTION_SCREEN_OFF,
+                    Intent.ACTION_SCREEN_ON,
+                    Intent.ACTION_USER_PRESENT,
+                    Intent.ACTION_USER_UNLOCKED,
+                    -> {
+                        refreshDeviceUnlockedState()
+                        refreshNetworkAvailability()
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+            addAction(Intent.ACTION_USER_UNLOCKED)
+        }
+        val didRegister = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                appContext.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("DEPRECATION")
+                appContext.registerReceiver(receiver, filter)
+            }
+        }.isSuccess
+        if (didRegister) {
+            screenStateReceiver = receiver
+        }
+    }
+
+    private fun registerNetworkCallback() {
+        if (networkCallback != null) {
+            return
+        }
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                refreshNetworkAvailability()
+            }
+
+            override fun onLost(network: Network) {
+                refreshNetworkAvailability()
+            }
+
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                refreshNetworkAvailability()
+            }
+
+            override fun onUnavailable() {
+                refreshNetworkAvailability()
+            }
+        }
+        val didRegister = runCatching {
+            connectivityManager.registerDefaultNetworkCallback(callback)
+        }.isSuccess
+        if (didRegister) {
+            networkCallback = callback
+        }
+    }
+
+    private fun unregisterRuntimeObservers() {
+        networkCallback?.let { callback ->
+            runCatching {
+                connectivityManager.unregisterNetworkCallback(callback)
+            }
+        }
+        networkCallback = null
+        screenStateReceiver?.let { receiver ->
+            runCatching {
+                appContext.unregisterReceiver(receiver)
+            }
+        }
+        screenStateReceiver = null
+    }
+
+    private fun refreshNetworkAvailability() {
+        val isAvailable = hasActiveNetworkConnection()
+        runtimeStateFlow.update { state ->
+            if (state.networkAvailable == isAvailable) {
+                state
+            } else {
+                state.copy(networkAvailable = isAvailable)
+            }
+        }
+    }
+
+    private fun refreshDeviceUnlockedState() {
+        val isUnlocked = isDeviceUnlocked()
+        runtimeStateFlow.update { state ->
+            if (state.deviceUnlocked == isUnlocked) {
+                state
+            } else {
+                state.copy(deviceUnlocked = isUnlocked)
+            }
+        }
+    }
+
+    private fun hasActiveNetworkConnection(): Boolean {
+        val activeNetwork = connectivityManager.activeNetwork ?: return false
+        return connectivityManager.getNetworkCapabilities(activeNetwork) != null
+    }
+
+    private fun isDeviceUnlocked(): Boolean {
+        val manager = keyguardManager ?: return true
+        return !manager.isDeviceLocked && !manager.isKeyguardLocked
+    }
+
+    private fun consumeEnableTransition(isEnabled: Boolean): Boolean {
+        val isEnableTransition = isEnabled && !lastObservedLanEnabledState
+        lastObservedLanEnabledState = isEnabled
+        return isEnableTransition
+    }
+
+    private fun shouldBypassImeVisibilityGate(
+        config: LanRuntimeConfig,
+        isEnableTransition: Boolean,
+    ): Boolean {
+        val reconnectGeneration = config.reconnectGeneration
+        val isManualReconnect = if (reconnectGeneration > lastProcessedManualReconnectGeneration) {
+            lastProcessedManualReconnectGeneration = reconnectGeneration
+            true
+        } else {
+            false
+        }
+        return isManualReconnect || isEnableTransition
+    }
+
+    private fun disconnectedReason(
+        config: LanRuntimeConfig,
+        allowImeHiddenBypass: Boolean,
+    ): String? {
+        return when {
+            !config.deviceUnlocked -> DISCONNECTED_REASON_DEVICE_LOCKED
+            !config.networkAvailable -> DISCONNECTED_REASON_NETWORK_UNAVAILABLE
+            !config.imeWindowVisible && !allowImeHiddenBypass -> DISCONNECTED_REASON_IME_HIDDEN
+            else -> null
+        }
+    }
+
+    private fun stopSession(resetDiscovery: Boolean) {
+        if (resetDiscovery) {
+            discovery.stop(resetError = true)
+        }
+        activeWebSocket?.cancel()
+        activeWebSocket = null
+        _activeEndpointFlow.value = null
+    }
+
     private fun buildTextPayload(text: String, isSensitive: Boolean): JsonObject {
         return buildJsonObject {
             put("mime_type", JsonPrimitive("text/plain"))
@@ -633,8 +878,8 @@ class LanClipboardSyncManager(
     override fun close() {
         lifecycleJob?.cancel()
         lifecycleJob = null
-        activeWebSocket?.cancel()
-        activeWebSocket = null
+        stopSession(resetDiscovery = false)
+        unregisterRuntimeObservers()
         discovery.close()
         scope.coroutineContext.cancelChildren()
     }
@@ -647,6 +892,16 @@ private data class LanRuntimeConfig(
     val port: Int,
     val token: String,
     val autoReconnect: Boolean,
+    val imeWindowVisible: Boolean,
+    val networkAvailable: Boolean,
+    val deviceUnlocked: Boolean,
+    val reconnectGeneration: Long,
+)
+
+private data class LanRuntimeState(
+    val imeWindowVisible: Boolean,
+    val networkAvailable: Boolean,
+    val deviceUnlocked: Boolean,
 )
 
 private data class SessionResult(

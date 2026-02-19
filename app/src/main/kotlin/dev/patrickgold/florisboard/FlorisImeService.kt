@@ -258,6 +258,7 @@ class FlorisImeService : LifecycleInputMethodService() {
     private val prefs by FlorisPreferenceStore
     val editorInstance by editorInstance()
     private val keyboardManager by keyboardManager()
+    private val lanClipboardManager by lanClipboardSyncManager()
     private val nlpManager by nlpManager()
     private val subtypeManager by subtypeManager()
     private val themeManager by themeManager()
@@ -353,6 +354,7 @@ class FlorisImeService : LifecycleInputMethodService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        lanClipboardManager.updateImeWindowVisibility(isVisible = false)
         unregisterReceiver(wallpaperChangeReceiver)
         FlorisImeServiceReference = WeakReference(null)
     }
@@ -368,6 +370,7 @@ class FlorisImeService : LifecycleInputMethodService() {
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         flogInfo { "restarting=$restarting info=${info?.debugSummarize()}" }
         super.onStartInputView(info, restarting)
+        lanClipboardManager.updateImeWindowVisibility(isVisible = true)
         if (info == null) return
         val editorInfo = FlorisEditorInfo.wrap(info)
         activeState.batchEdit {
@@ -409,6 +412,7 @@ class FlorisImeService : LifecycleInputMethodService() {
     override fun onFinishInputView(finishingInput: Boolean) {
         flogInfo { "finishing=$finishingInput" }
         super.onFinishInputView(finishingInput)
+        lanClipboardManager.updateImeWindowVisibility(isVisible = false)
         editorInstance.handleFinishInputView()
     }
 
@@ -421,6 +425,7 @@ class FlorisImeService : LifecycleInputMethodService() {
 
     override fun onWindowShown() {
         super.onWindowShown()
+        lanClipboardManager.updateImeWindowVisibility(isVisible = true)
         if (windowController.onWindowShown()) {
             flogInfo(LogTopic.IMS_EVENTS)
             inputFeedbackController.updateSystemPrefsState()
@@ -431,6 +436,7 @@ class FlorisImeService : LifecycleInputMethodService() {
 
     override fun onWindowHidden() {
         super.onWindowHidden()
+        lanClipboardManager.updateImeWindowVisibility(isVisible = false)
         if (windowController.onWindowHidden()) {
             flogInfo(LogTopic.IMS_EVENTS)
             activeState.batchEdit {

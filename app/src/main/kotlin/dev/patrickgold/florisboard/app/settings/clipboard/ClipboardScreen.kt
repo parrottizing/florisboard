@@ -256,6 +256,12 @@ fun ClipboardScreen() = FlorisScreen {
                 title = stringRes(R.string.pref__clipboard__lan_sync_connection_status__label),
                 summary = when (lanConnectionStatus.state) {
                     LanClipboardConnectionState.DISABLED -> stringRes(R.string.pref__clipboard__lan_sync_status__disabled)
+                    LanClipboardConnectionState.DISCONNECTED -> lanConnectionStatus.message?.let { reason ->
+                        stringRes(
+                            R.string.pref__clipboard__lan_sync_status__disconnected_with_reason,
+                            "reason" to reason,
+                        )
+                    } ?: stringRes(R.string.pref__clipboard__lan_sync_status__disconnected)
                     LanClipboardConnectionState.DISCOVERING -> stringRes(R.string.pref__clipboard__lan_sync_status__discovering)
                     LanClipboardConnectionState.CONNECTING -> stringRes(
                         R.string.pref__clipboard__lan_sync_status__connecting,
@@ -276,6 +282,14 @@ fun ClipboardScreen() = FlorisScreen {
                     LanClipboardConnectionState.ERROR -> lanConnectionStatus.message
                         ?: stringRes(R.string.pref__clipboard__lan_sync_status__error)
                 },
+            )
+            Preference(
+                title = stringRes(R.string.pref__clipboard__lan_sync_manual_reconnect__label),
+                summary = stringRes(R.string.pref__clipboard__lan_sync_manual_reconnect__summary),
+                onClick = {
+                    lanClipboardSyncManager.requestManualReconnect()
+                },
+                enabledIf = { prefs.clipboard.lanSyncEnabled isEqualTo true },
             )
             if (lanSyncEndpointMode == LanClipboardEndpointMode.AUTO_DISCOVERY && discoveredEndpoints.isNotEmpty()) {
                 Preference(
