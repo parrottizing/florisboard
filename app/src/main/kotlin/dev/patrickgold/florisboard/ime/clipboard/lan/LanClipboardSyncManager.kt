@@ -30,6 +30,7 @@ import dev.patrickgold.florisboard.ime.clipboard.provider.ItemType
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.coroutines.resume
 import kotlin.random.Random
@@ -72,7 +73,6 @@ private const val BACKOFF_BASE_MS = 250L
 private const val BACKOFF_CAP_MS = 5_000L
 private const val MAX_TEXT_EVENT_CHARS = 262_144
 private const val STALE_EVENT_WINDOW_MS = 120_000L
-private const val DISCONNECTED_REASON_IME_HIDDEN = "Open FlorisBoard keyboard to reconnect"
 private const val DISCONNECTED_REASON_NETWORK_UNAVAILABLE = "No active network available"
 private const val DISCONNECTED_REASON_DEVICE_LOCKED = "Device is locked"
 private const val DISCONNECTED_REASON_MANUAL_HOST_MISSING = "Manual host is missing"
@@ -99,16 +99,12 @@ class LanClipboardSyncManager(
     private var activeWebSocket: WebSocket? = null
     private val runtimeStateFlow = MutableStateFlow(
         LanRuntimeState(
-            imeWindowVisible = false,
             networkAvailable = hasActiveNetworkConnection(),
             deviceUnlocked = isDeviceUnlocked(),
         ),
     )
+    private val pendingOutboundText = AtomicReference<PendingOutboundText?>(null)
     private val manualReconnectSignal = MutableStateFlow(0L)
-    @Volatile
-    private var lastProcessedManualReconnectGeneration = 0L
-    @Volatile
-    private var lastObservedLanEnabledState = prefs.clipboard.lanSyncEnabled.get()
 
     private val _connectionStatusFlow = MutableStateFlow(LanClipboardConnectionStatus.Disabled)
     val connectionStatusFlow: StateFlow<LanClipboardConnectionStatus> = _connectionStatusFlow.asStateFlow()
@@ -126,13 +122,6 @@ class LanClipboardSyncManager(
     }
 
     fun updateImeWindowVisibility(isVisible: Boolean) {
-        runtimeStateFlow.update { state ->
-            if (state.imeWindowVisible == isVisible) {
-                state
-            } else {
-                state.copy(imeWindowVisible = isVisible)
-            }
-        }
         if (isVisible) {
             refreshDeviceUnlockedState()
             refreshNetworkAvailability()
@@ -163,16 +152,19 @@ class LanClipboardSyncManager(
             return
         }
 
-        val socket = activeWebSocket ?: return
-        val outboundEvent = LanClipboardProtocol.buildSetTextEvent(
-            deviceId = deviceId,
+        val pendingEvent = PendingOutboundText(
             text = text,
             isSensitive = item.isSensitive,
         )
-        val isSent = runCatching {
-            socket.send(outboundEvent)
-        }.getOrElse { false }
+        val socket = activeWebSocket
+        if (socket == null) {
+            pendingOutboundText.set(pendingEvent)
+            return
+        }
+        pendingOutboundText.set(null)
+        val isSent = sendOutboundSetTextEvent(socket, pendingEvent)
         if (!isSent) {
+            pendingOutboundText.set(pendingEvent)
             detachActiveSocket(socket)
         }
     }
@@ -197,7 +189,6 @@ class LanClipboardSyncManager(
                     port = port.coerceIn(1, 65535),
                     token = token.trim(),
                     autoReconnect = true,
-                    imeWindowVisible = false,
                     networkAvailable = true,
                     deviceUnlocked = true,
                     reconnectGeneration = 0L,
@@ -208,7 +199,6 @@ class LanClipboardSyncManager(
                 }
                 .combine(runtimeStateFlow) { partialConfig, runtimeState ->
                     partialConfig.copy(
-                        imeWindowVisible = runtimeState.imeWindowVisible,
                         networkAvailable = runtimeState.networkAvailable,
                         deviceUnlocked = runtimeState.deviceUnlocked,
                     )
@@ -224,8 +214,8 @@ class LanClipboardSyncManager(
     }
 
     private suspend fun runSessionLifecycle(config: LanRuntimeConfig) {
-        val isEnableTransition = consumeEnableTransition(config.isEnabled)
         if (!config.isEnabled) {
+            pendingOutboundText.set(null)
             stopSession(resetDiscovery = true)
             _connectionStatusFlow.value = LanClipboardConnectionStatus.Disabled
             return
@@ -240,14 +230,7 @@ class LanClipboardSyncManager(
             return
         }
 
-        val allowImeHiddenBypass = shouldBypassImeVisibilityGate(
-            config = config,
-            isEnableTransition = isEnableTransition,
-        )
-        val disconnectedReason = disconnectedReason(
-            config = config,
-            allowImeHiddenBypass = allowImeHiddenBypass,
-        )
+        val disconnectedReason = disconnectedReason(config)
         if (disconnectedReason != null) {
             stopSession(resetDiscovery = true)
             _connectionStatusFlow.value = LanClipboardConnectionStatus(
@@ -389,6 +372,12 @@ class LanClipboardSyncManager(
                         state = LanClipboardConnectionState.CONNECTED,
                         endpoint = endpoint,
                     )
+                    val didFlushPending = flushPendingOutboundText(webSocket)
+                    if (!didFlushPending) {
+                        complete(SessionResult.retryable("Failed to send pending clipboard event"))
+                        webSocket.cancel()
+                        return
+                    }
                     heartbeatJob = scope.launch {
                         while (isActive) {
                             delay(HEARTBEAT_INTERVAL_MS)
@@ -665,6 +654,33 @@ class LanClipboardSyncManager(
         sendAck(webSocket, eventId = eventId, status = "accepted")
     }
 
+    private fun sendOutboundSetTextEvent(
+        webSocket: WebSocket,
+        event: PendingOutboundText,
+    ): Boolean {
+        val outboundEvent = LanClipboardProtocol.buildSetTextEvent(
+            deviceId = deviceId,
+            text = event.text,
+            isSensitive = event.isSensitive,
+        )
+        return runCatching {
+            webSocket.send(outboundEvent)
+        }.getOrElse { false }
+    }
+
+    private fun flushPendingOutboundText(webSocket: WebSocket): Boolean {
+        while (true) {
+            val pendingEvent = pendingOutboundText.get() ?: return true
+            val isSent = sendOutboundSetTextEvent(webSocket, pendingEvent)
+            if (!isSent) {
+                return false
+            }
+            if (pendingOutboundText.compareAndSet(pendingEvent, null)) {
+                return true
+            }
+        }
+    }
+
     private fun sendAck(webSocket: WebSocket, eventId: String, status: String, errorCode: String? = null) {
         webSocket.send(
             LanClipboardProtocol.buildAckEvent(
@@ -814,34 +830,10 @@ class LanClipboardSyncManager(
         return !manager.isDeviceLocked && !manager.isKeyguardLocked
     }
 
-    private fun consumeEnableTransition(isEnabled: Boolean): Boolean {
-        val isEnableTransition = isEnabled && !lastObservedLanEnabledState
-        lastObservedLanEnabledState = isEnabled
-        return isEnableTransition
-    }
-
-    private fun shouldBypassImeVisibilityGate(
-        config: LanRuntimeConfig,
-        isEnableTransition: Boolean,
-    ): Boolean {
-        val reconnectGeneration = config.reconnectGeneration
-        val isManualReconnect = if (reconnectGeneration > lastProcessedManualReconnectGeneration) {
-            lastProcessedManualReconnectGeneration = reconnectGeneration
-            true
-        } else {
-            false
-        }
-        return isManualReconnect || isEnableTransition
-    }
-
-    private fun disconnectedReason(
-        config: LanRuntimeConfig,
-        allowImeHiddenBypass: Boolean,
-    ): String? {
+    private fun disconnectedReason(config: LanRuntimeConfig): String? {
         return when {
             !config.deviceUnlocked -> DISCONNECTED_REASON_DEVICE_LOCKED
             !config.networkAvailable -> DISCONNECTED_REASON_NETWORK_UNAVAILABLE
-            !config.imeWindowVisible && !allowImeHiddenBypass -> DISCONNECTED_REASON_IME_HIDDEN
             else -> null
         }
     }
@@ -892,16 +884,19 @@ private data class LanRuntimeConfig(
     val port: Int,
     val token: String,
     val autoReconnect: Boolean,
-    val imeWindowVisible: Boolean,
     val networkAvailable: Boolean,
     val deviceUnlocked: Boolean,
     val reconnectGeneration: Long,
 )
 
 private data class LanRuntimeState(
-    val imeWindowVisible: Boolean,
     val networkAvailable: Boolean,
     val deviceUnlocked: Boolean,
+)
+
+private data class PendingOutboundText(
+    val text: String,
+    val isSensitive: Boolean,
 )
 
 private data class SessionResult(
