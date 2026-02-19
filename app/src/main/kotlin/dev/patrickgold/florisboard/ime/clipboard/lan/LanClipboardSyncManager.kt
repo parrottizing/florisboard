@@ -20,13 +20,21 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.Uri
 import android.os.Build
+import android.util.Base64
+import androidx.exifinterface.media.ExifInterface
 import dev.patrickgold.florisboard.app.FlorisPreferenceStore
 import dev.patrickgold.florisboard.ime.clipboard.provider.ClipboardItem
 import dev.patrickgold.florisboard.ime.clipboard.provider.ItemType
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -56,6 +64,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import okhttp3.OkHttpClient
@@ -70,9 +79,13 @@ private const val HEARTBEAT_TIMEOUT_MS = 45_000L
 private const val BACKOFF_BASE_MS = 250L
 private const val BACKOFF_CAP_MS = 5_000L
 private const val MAX_TEXT_EVENT_CHARS = 262_144
+private const val MAX_IMAGE_READ_BYTES = 32 * 1024 * 1024
 private const val STALE_EVENT_WINDOW_MS = 120_000L
 private const val DISCONNECTED_REASON_NETWORK_UNAVAILABLE = "No active network available"
 private const val DISCONNECTED_REASON_MANUAL_HOST_MISSING = "Manual host is missing"
+private val IMAGE_COMPRESSION_QUALITY_STEPS = intArrayOf(95, 90, 85, 80, 75, 70, 65, 60, 55)
+private val WEBP_LOSSY_COMPRESS_FORMAT = runCatching { Bitmap.CompressFormat.valueOf("WEBP_LOSSY") }.getOrNull()
+private val WEBP_COMPRESS_FORMAT = runCatching { Bitmap.CompressFormat.valueOf("WEBP") }.getOrNull()
 
 class LanClipboardSyncManager(
     context: Context,
@@ -98,7 +111,7 @@ class LanClipboardSyncManager(
             networkAvailable = hasActiveNetworkConnection(),
         ),
     )
-    private val pendingOutboundText = AtomicReference<PendingOutboundText?>(null)
+    private val pendingOutboundEvent = AtomicReference<PendingOutboundEvent?>(null)
     private val manualReconnectSignal = MutableStateFlow(0L)
 
     private val _connectionStatusFlow = MutableStateFlow(LanClipboardConnectionStatus.Disabled)
@@ -111,9 +124,17 @@ class LanClipboardSyncManager(
     private val inboundDedupeCache = LanClipboardInboundDedupeCache()
     @Volatile
     private var inboundTextHandler: ((text: String, isSensitive: Boolean) -> Boolean)? = null
+    @Volatile
+    private var inboundImageHandler: ((mimeType: String, imageBytes: ByteArray, width: Int, height: Int, orientation: Int) -> Boolean)? = null
 
     fun setInboundTextHandler(handler: ((text: String, isSensitive: Boolean) -> Boolean)?) {
         inboundTextHandler = handler
+    }
+
+    fun setInboundImageHandler(
+        handler: ((mimeType: String, imageBytes: ByteArray, width: Int, height: Int, orientation: Int) -> Boolean)?,
+    ) {
+        inboundImageHandler = handler
     }
 
     fun updateImeWindowVisibility(isVisible: Boolean) {
@@ -131,33 +152,27 @@ class LanClipboardSyncManager(
         if (!prefs.clipboard.lanSyncEnabled.get() || item == null) {
             return
         }
-        if (item.type != ItemType.TEXT || item.isRemoteDevice) {
+        if (item.isRemoteDevice) {
             return
         }
-        val text = item.text ?: return
-        if (text.isBlank() || text.length > MAX_TEXT_EVENT_CHARS) {
-            return
+        val pendingEvent = when (item.type) {
+            ItemType.TEXT -> buildPendingOutboundText(item) ?: return
+            ItemType.IMAGE -> buildPendingOutboundImage(item) ?: return
+            else -> return
         }
-        val outboundPayloadHash = LanClipboardProtocol.computePayloadHash(
-            buildTextPayload(text = text, isSensitive = item.isSensitive),
-        )
+        val outboundPayloadHash = LanClipboardProtocol.computePayloadHash(pendingEvent.payload)
         if (inboundDedupeCache.hasRecentPayloadHash(LAN_CLIPBOARD_SOURCE_MAC, outboundPayloadHash)) {
             return
         }
-
-        val pendingEvent = PendingOutboundText(
-            text = text,
-            isSensitive = item.isSensitive,
-        )
         val socket = activeWebSocket
         if (socket == null) {
-            pendingOutboundText.set(pendingEvent)
+            pendingOutboundEvent.set(pendingEvent)
             return
         }
-        pendingOutboundText.set(null)
-        val isSent = sendOutboundSetTextEvent(socket, pendingEvent)
+        pendingOutboundEvent.set(null)
+        val isSent = sendOutboundEvent(socket, pendingEvent)
         if (!isSent) {
-            pendingOutboundText.set(pendingEvent)
+            pendingOutboundEvent.set(pendingEvent)
             detachActiveSocket(socket)
         }
     }
@@ -206,7 +221,7 @@ class LanClipboardSyncManager(
 
     private suspend fun runSessionLifecycle(config: LanRuntimeConfig) {
         if (!config.isEnabled) {
-            pendingOutboundText.set(null)
+            pendingOutboundEvent.set(null)
             stopSession(resetDiscovery = true)
             _connectionStatusFlow.value = LanClipboardConnectionStatus.Disabled
             return
@@ -363,7 +378,7 @@ class LanClipboardSyncManager(
                         state = LanClipboardConnectionState.CONNECTED,
                         endpoint = endpoint,
                     )
-                    val didFlushPending = flushPendingOutboundText(webSocket)
+                    val didFlushPending = flushPendingOutboundEvent(webSocket)
                     if (!didFlushPending) {
                         complete(SessionResult.retryable("Failed to send pending clipboard event"))
                         webSocket.cancel()
@@ -409,23 +424,7 @@ class LanClipboardSyncManager(
                             handleInboundSetText(webSocket, envelope)
                         }
                         "set_image" -> {
-                            val eventId = envelope["event_id"]?.jsonPrimitive?.contentOrNull
-                            if (!eventId.isNullOrBlank()) {
-                                sendRejectedWithError(
-                                    webSocket = webSocket,
-                                    eventId = eventId,
-                                    code = "UNSUPPORTED_TYPE",
-                                    message = "set_image is disabled in v1 mode",
-                                )
-                            } else {
-                                webSocket.send(
-                                    LanClipboardProtocol.buildErrorEvent(
-                                        deviceId = deviceId,
-                                        code = "UNSUPPORTED_TYPE",
-                                        message = "set_image is disabled in v1 mode",
-                                    ),
-                                )
-                            }
+                            handleInboundSetImage(webSocket, envelope)
                         }
                         "error" -> {
                             val errorCode = LanClipboardProtocol.payloadOrNull(envelope)
@@ -645,28 +644,281 @@ class LanClipboardSyncManager(
         sendAck(webSocket, eventId = eventId, status = "accepted")
     }
 
-    private fun sendOutboundSetTextEvent(
+    private fun handleInboundSetImage(webSocket: WebSocket, envelope: JsonObject) {
+        val nowMs = System.currentTimeMillis()
+        val eventId = envelope["event_id"]?.jsonPrimitive?.contentOrNull
+        if (eventId.isNullOrBlank()) {
+            webSocket.send(
+                LanClipboardProtocol.buildErrorEvent(
+                    deviceId = deviceId,
+                    code = "BAD_MESSAGE",
+                    message = "set_image event is missing event_id",
+                ),
+            )
+            return
+        }
+
+        val protocolVersion = envelope["protocol_version"]?.jsonPrimitive?.contentOrNull
+        if (!LanClipboardProtocol.isSupportedProtocolVersion(protocolVersion)) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "VERSION_MISMATCH",
+                message = "Unsupported protocol_version for set_image event",
+            )
+            return
+        }
+
+        val source = envelope["source"]?.jsonPrimitive?.contentOrNull
+        if (!LanClipboardProtocol.isSupportedSource(source)) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_image event source must be android or mac",
+            )
+            return
+        }
+        val normalizedSource = source ?: return
+
+        val payloadHash = envelope["payload_hash"]?.jsonPrimitive?.contentOrNull
+        if (payloadHash.isNullOrBlank()) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_image event is missing payload_hash",
+            )
+            return
+        }
+
+        if (inboundDedupeCache.hasSeenEventId(normalizedSource, eventId, nowMs)) {
+            sendAck(webSocket, eventId = eventId, status = "duplicate")
+            return
+        }
+
+        val createdAtMs = envelope["created_at_ms"]?.jsonPrimitive?.longOrNull
+        if (createdAtMs == null) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_image event has invalid created_at_ms",
+            )
+            return
+        }
+        if (abs(nowMs - createdAtMs) > STALE_EVENT_WINDOW_MS) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "STALE_EVENT",
+                message = "set_image event is outside the stale window",
+            )
+            return
+        }
+
+        val payload = LanClipboardProtocol.payloadOrNull(envelope)
+        if (payload == null) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_image event is missing payload",
+            )
+            return
+        }
+
+        val computedPayloadHash = LanClipboardProtocol.computePayloadHash(payload)
+        if (!payloadHash.equals(computedPayloadHash, ignoreCase = false)) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "HASH_MISMATCH",
+                message = "payload_hash does not match payload",
+            )
+            return
+        }
+
+        val mimeType = payload["mime_type"]?.jsonPrimitive?.contentOrNull?.lowercase()
+        if (!LanClipboardProtocol.isSupportedImageMimeType(mimeType)) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "UNSUPPORTED_TYPE",
+                message = "set_image payload mime_type is unsupported",
+            )
+            return
+        }
+
+        val declaredByteSize = payload["byte_size"]?.jsonPrimitive?.intOrNull
+        if (declaredByteSize == null || declaredByteSize <= 0) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_image payload byte_size must be a positive integer",
+            )
+            return
+        }
+        if (declaredByteSize > LAN_CLIPBOARD_MAX_IMAGE_BYTE_SIZE) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "PAYLOAD_TOO_LARGE",
+                message = "set_image payload byte_size exceeds maximum supported size",
+            )
+            return
+        }
+
+        val dataBase64 = payload["data_base64"]?.jsonPrimitive?.contentOrNull
+        if (dataBase64.isNullOrBlank() || dataBase64.length > LAN_CLIPBOARD_MAX_IMAGE_BASE64_CHARS) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_image payload data_base64 must be a valid base64 string",
+            )
+            return
+        }
+
+        val width = payload["width"]?.jsonPrimitive?.intOrNull
+        val height = payload["height"]?.jsonPrimitive?.intOrNull
+        if (width == null || width <= 0 || height == null || height <= 0) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_image payload width and height must be positive integers",
+            )
+            return
+        }
+
+        val orientation = payload["orientation"]?.jsonPrimitive?.intOrNull
+        if (!LanClipboardProtocol.isSupportedImageOrientation(orientation)) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_image payload orientation must be one of 0, 90, 180, 270",
+            )
+            return
+        }
+        val normalizedOrientation = orientation ?: return
+
+        val imageBytes = runCatching {
+            Base64.decode(dataBase64, Base64.DEFAULT)
+        }.getOrElse {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_image payload data_base64 could not be decoded",
+            )
+            return
+        }
+
+        if (imageBytes.size != declaredByteSize) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_image payload byte_size does not match decoded payload length",
+            )
+            return
+        }
+        if (imageBytes.size > LAN_CLIPBOARD_MAX_IMAGE_BYTE_SIZE) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "PAYLOAD_TOO_LARGE",
+                message = "set_image payload exceeds maximum supported size",
+            )
+            return
+        }
+
+        val decodedBounds = decodeImageBounds(imageBytes)
+        if (decodedBounds == null) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_image payload data_base64 is not a decodable image",
+            )
+            return
+        }
+        if (decodedBounds.first != width || decodedBounds.second != height) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "BAD_MESSAGE",
+                message = "set_image payload width/height do not match decoded image",
+            )
+            return
+        }
+
+        if (inboundDedupeCache.hasRecentPayloadHash(normalizedSource, payloadHash, nowMs)) {
+            inboundDedupeCache.record(normalizedSource, eventId, payloadHash, nowMs)
+            sendAck(webSocket, eventId = eventId, status = "duplicate")
+            return
+        }
+
+        val applied = runCatching {
+            inboundImageHandler?.invoke(
+                mimeType ?: "image/png",
+                imageBytes,
+                width,
+                height,
+                normalizedOrientation,
+            ) ?: false
+        }.getOrDefault(false)
+        if (!applied) {
+            sendRejectedWithError(
+                webSocket = webSocket,
+                eventId = eventId,
+                code = "TEMPORARY_UNAVAILABLE",
+                message = "Failed applying inbound clipboard image",
+                retryable = true,
+            )
+            return
+        }
+
+        inboundDedupeCache.record(normalizedSource, eventId, payloadHash, nowMs)
+        sendAck(webSocket, eventId = eventId, status = "accepted")
+    }
+
+    private fun sendOutboundEvent(
         webSocket: WebSocket,
-        event: PendingOutboundText,
+        event: PendingOutboundEvent,
     ): Boolean {
-        val outboundEvent = LanClipboardProtocol.buildSetTextEvent(
-            deviceId = deviceId,
-            text = event.text,
-            isSensitive = event.isSensitive,
-        )
+        val outboundEvent = when (event) {
+            is PendingOutboundEvent.Text -> LanClipboardProtocol.buildSetTextEvent(
+                deviceId = deviceId,
+                text = event.text,
+                isSensitive = event.isSensitive,
+            )
+            is PendingOutboundEvent.Image -> LanClipboardProtocol.buildSetImageEvent(
+                deviceId = deviceId,
+                mimeType = event.mimeType,
+                byteSize = event.byteSize,
+                dataBase64 = event.dataBase64,
+                width = event.width,
+                height = event.height,
+                orientation = event.orientation,
+            )
+        }
         return runCatching {
             webSocket.send(outboundEvent)
         }.getOrElse { false }
     }
 
-    private fun flushPendingOutboundText(webSocket: WebSocket): Boolean {
+    private fun flushPendingOutboundEvent(webSocket: WebSocket): Boolean {
         while (true) {
-            val pendingEvent = pendingOutboundText.get() ?: return true
-            val isSent = sendOutboundSetTextEvent(webSocket, pendingEvent)
+            val pendingEvent = pendingOutboundEvent.get() ?: return true
+            val isSent = sendOutboundEvent(webSocket, pendingEvent)
             if (!isSent) {
                 return false
             }
-            if (pendingOutboundText.compareAndSet(pendingEvent, null)) {
+            if (pendingOutboundEvent.compareAndSet(pendingEvent, null)) {
                 return true
             }
         }
@@ -819,11 +1071,257 @@ class LanClipboardSyncManager(
         _activeEndpointFlow.value = null
     }
 
+    private fun buildPendingOutboundText(item: ClipboardItem): PendingOutboundEvent.Text? {
+        val text = item.text ?: return null
+        if (text.isBlank() || text.length > MAX_TEXT_EVENT_CHARS) {
+            return null
+        }
+        return PendingOutboundEvent.Text(
+            text = text,
+            isSensitive = item.isSensitive,
+            payload = buildTextPayload(text = text, isSensitive = item.isSensitive),
+        )
+    }
+
+    private fun buildPendingOutboundImage(item: ClipboardItem): PendingOutboundEvent.Image? {
+        val uri = item.uri ?: return null
+        val rawImageBytes = readUriBytes(uri, maxBytes = MAX_IMAGE_READ_BYTES) ?: return null
+        if (rawImageBytes.isEmpty()) {
+            return null
+        }
+        val imageBounds = decodeImageBounds(rawImageBytes) ?: return null
+        val orientation = readExifOrientationDegrees(rawImageBytes)
+        val explicitMimeType = item.mimeTypes.firstOrNull { LanClipboardProtocol.isSupportedImageMimeType(it) }
+        val normalizedMimeType = normalizeImageMimeType(
+            explicitMimeType ?: appContext.contentResolver.getType(uri),
+        )
+
+        if (normalizedMimeType != null && rawImageBytes.size <= LAN_CLIPBOARD_MAX_IMAGE_BYTE_SIZE) {
+            return buildImagePendingEvent(
+                mimeType = normalizedMimeType,
+                imageBytes = rawImageBytes,
+                width = imageBounds.first,
+                height = imageBounds.second,
+                orientation = orientation,
+            )
+        }
+
+        val decodedBitmap = BitmapFactory.decodeByteArray(rawImageBytes, 0, rawImageBytes.size) ?: return null
+        return compressBitmapToPendingEvent(decodedBitmap, orientation)
+    }
+
+    private fun readUriBytes(uri: Uri, maxBytes: Int): ByteArray? {
+        val inputStream = runCatching {
+            appContext.contentResolver.openInputStream(uri)
+        }.getOrNull() ?: return null
+        inputStream.use { stream ->
+            val output = ByteArrayOutputStream()
+            val buffer = ByteArray(8_192)
+            while (true) {
+                val read = stream.read(buffer)
+                if (read <= 0) {
+                    break
+                }
+                output.write(buffer, 0, read)
+                if (output.size() > maxBytes) {
+                    return null
+                }
+            }
+            return output.toByteArray()
+        }
+    }
+
+    private fun decodeImageBounds(imageBytes: ByteArray): Pair<Int, Int>? {
+        val options = BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+        BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size, options)
+        val width = options.outWidth
+        val height = options.outHeight
+        return if (width > 0 && height > 0) {
+            width to height
+        } else {
+            null
+        }
+    }
+
+    private fun readExifOrientationDegrees(imageBytes: ByteArray): Int {
+        return runCatching {
+            ByteArrayInputStream(imageBytes).use { input ->
+                val exifOrientation = ExifInterface(input).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL,
+                )
+                when (exifOrientation) {
+                    ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                    ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                    ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                    else -> 0
+                }
+            }
+        }.getOrDefault(0)
+    }
+
+    private fun normalizeImageMimeType(mimeType: String?): String? {
+        val normalized = mimeType?.trim()?.lowercase() ?: return null
+        val canonical = when (normalized) {
+            "image/jpg" -> "image/jpeg"
+            else -> normalized
+        }
+        return canonical.takeIf { LanClipboardProtocol.isSupportedImageMimeType(it) }
+    }
+
+    private fun compressBitmapToPendingEvent(
+        bitmap: Bitmap,
+        orientation: Int,
+    ): PendingOutboundEvent.Image? {
+        var workingBitmap = bitmap
+        var normalizedOrientation = orientation
+        if (orientation in LAN_CLIPBOARD_ALLOWED_IMAGE_ORIENTATIONS && orientation != 0) {
+            val rotated = runCatching {
+                rotateBitmap(bitmap, orientation)
+            }.getOrNull()
+            if (rotated != null) {
+                if (rotated !== bitmap) {
+                    bitmap.recycle()
+                }
+                workingBitmap = rotated
+                normalizedOrientation = 0
+            }
+        }
+        return try {
+            val width = workingBitmap.width
+            val height = workingBitmap.height
+            if (workingBitmap.hasAlpha()) {
+                val pngBytes = encodeBitmap(workingBitmap, Bitmap.CompressFormat.PNG, 100)
+                if (pngBytes != null && pngBytes.size <= LAN_CLIPBOARD_MAX_IMAGE_BYTE_SIZE) {
+                    return buildImagePendingEvent(
+                        mimeType = "image/png",
+                        imageBytes = pngBytes,
+                        width = width,
+                        height = height,
+                        orientation = normalizedOrientation,
+                    )
+                }
+            }
+
+            for (quality in IMAGE_COMPRESSION_QUALITY_STEPS) {
+                val jpegBytes = encodeBitmap(workingBitmap, Bitmap.CompressFormat.JPEG, quality)
+                if (jpegBytes != null && jpegBytes.size <= LAN_CLIPBOARD_MAX_IMAGE_BYTE_SIZE) {
+                    return buildImagePendingEvent(
+                        mimeType = "image/jpeg",
+                        imageBytes = jpegBytes,
+                        width = width,
+                        height = height,
+                        orientation = normalizedOrientation,
+                    )
+                }
+            }
+
+            val webpFormat = WEBP_LOSSY_COMPRESS_FORMAT ?: WEBP_COMPRESS_FORMAT
+            if (webpFormat != null) {
+                for (quality in IMAGE_COMPRESSION_QUALITY_STEPS) {
+                    val webpBytes = encodeBitmap(workingBitmap, webpFormat, quality)
+                    if (webpBytes != null && webpBytes.size <= LAN_CLIPBOARD_MAX_IMAGE_BYTE_SIZE) {
+                        return buildImagePendingEvent(
+                            mimeType = "image/webp",
+                            imageBytes = webpBytes,
+                            width = width,
+                            height = height,
+                            orientation = normalizedOrientation,
+                        )
+                    }
+                }
+            }
+            null
+        } finally {
+            workingBitmap.recycle()
+        }
+    }
+
+    private fun rotateBitmap(bitmap: Bitmap, degrees: Int): Bitmap {
+        val matrix = Matrix().apply {
+            postRotate(degrees.toFloat())
+        }
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    }
+
+    private fun encodeBitmap(
+        bitmap: Bitmap,
+        format: Bitmap.CompressFormat,
+        quality: Int,
+    ): ByteArray? {
+        val output = ByteArrayOutputStream()
+        val didCompress = runCatching {
+            bitmap.compress(format, quality, output)
+        }.getOrDefault(false)
+        if (!didCompress) {
+            return null
+        }
+        return output.toByteArray()
+    }
+
+    private fun buildImagePendingEvent(
+        mimeType: String,
+        imageBytes: ByteArray,
+        width: Int,
+        height: Int,
+        orientation: Int,
+    ): PendingOutboundEvent.Image? {
+        if (!LanClipboardProtocol.isSupportedImageMimeType(mimeType)) {
+            return null
+        }
+        if (!LanClipboardProtocol.isSupportedImageOrientation(orientation)) {
+            return null
+        }
+        if (width <= 0 || height <= 0 || imageBytes.isEmpty() || imageBytes.size > LAN_CLIPBOARD_MAX_IMAGE_BYTE_SIZE) {
+            return null
+        }
+        val dataBase64 = Base64.encodeToString(imageBytes, Base64.NO_WRAP)
+        if (dataBase64.length > LAN_CLIPBOARD_MAX_IMAGE_BASE64_CHARS) {
+            return null
+        }
+        return PendingOutboundEvent.Image(
+            mimeType = mimeType,
+            byteSize = imageBytes.size,
+            dataBase64 = dataBase64,
+            width = width,
+            height = height,
+            orientation = orientation,
+            payload = buildImagePayload(
+                mimeType = mimeType,
+                byteSize = imageBytes.size,
+                dataBase64 = dataBase64,
+                width = width,
+                height = height,
+                orientation = orientation,
+            ),
+        )
+    }
+
     private fun buildTextPayload(text: String, isSensitive: Boolean): JsonObject {
         return buildJsonObject {
             put("mime_type", JsonPrimitive("text/plain"))
             put("text", JsonPrimitive(text))
             put("is_sensitive", JsonPrimitive(isSensitive))
+        }
+    }
+
+    private fun buildImagePayload(
+        mimeType: String,
+        byteSize: Int,
+        dataBase64: String,
+        width: Int,
+        height: Int,
+        orientation: Int,
+    ): JsonObject {
+        return buildJsonObject {
+            put("mime_type", JsonPrimitive(mimeType))
+            put("byte_size", JsonPrimitive(byteSize))
+            put("data_base64", JsonPrimitive(dataBase64))
+            put("width", JsonPrimitive(width))
+            put("height", JsonPrimitive(height))
+            put("orientation", JsonPrimitive(orientation))
         }
     }
 
@@ -864,10 +1362,25 @@ private data class LanRuntimeState(
     val networkAvailable: Boolean,
 )
 
-private data class PendingOutboundText(
-    val text: String,
-    val isSensitive: Boolean,
-)
+private sealed class PendingOutboundEvent {
+    abstract val payload: JsonObject
+
+    data class Text(
+        val text: String,
+        val isSensitive: Boolean,
+        override val payload: JsonObject,
+    ) : PendingOutboundEvent()
+
+    data class Image(
+        val mimeType: String,
+        val byteSize: Int,
+        val dataBase64: String,
+        val width: Int,
+        val height: Int,
+        val orientation: Int,
+        override val payload: JsonObject,
+    ) : PendingOutboundEvent()
+}
 
 private data class SessionResult(
     val retryable: Boolean,
