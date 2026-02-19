@@ -738,6 +738,7 @@
     <string name="pref__clipboard__lan_sync_enabled__label">Enable LAN clipboard sync</string>
     <string name="pref__clipboard__lan_sync_enabled__summary">Sync clipboard content with a paired LAN bridge</string>
     <string name="pref__clipboard__lan_sync_endpoint_mode__label">Endpoint mode</string>
+    <string name="pref__clipboard__lan_sync_reliability_mode__label">Reliability mode</string>
     <string name="pref__clipboard__lan_sync_manual_host__label">Manual host</string>
     <string name="pref__clipboard__lan_sync_manual_host__summary_empty">No manual host configured</string>
     <string name="pref__clipboard__lan_sync_manual_host__dialog_title">Set manual host</string>
@@ -763,6 +764,11 @@
     <string name="pref__clipboard__lan_sync_manual_reconnect__summary">Force a fresh connection attempt</string>
     <string name="pref__clipboard__lan_sync_discovered_endpoint__label">Discovered endpoint</string>
     <string name="pref__clipboard__lan_sync_selected_endpoint__label">Selected endpoint</string>
+    <string name="lan_clipboard__notification_channel__title">LAN clipboard sync</string>
+    <string name="lan_clipboard__notification__title">LAN clipboard sync</string>
+    <string name="lan_clipboard__notification__starting">Starting service…</string>
+    <string name="lan_clipboard__notification__open_settings">Clipboard settings</string>
+    <string name="lan_clipboard__notification__reconnect_now">Reconnect now</string>
     <string name="send_to_clipboard__unknown_error">An unknown error occurred. Please try again!</string>
     <string name="send_to_clipboard__type_not_supported_error">This media type is not supported.</string>
     <string name="send_to_clipboard__description__copied_image_to_clipboard">Copied below image to clipboard.</string>
@@ -992,6 +998,10 @@
     <string name="enum__lan_clipboard_endpoint_mode__auto_discovery__description" comment="Enum value description">Use mDNS on the local network and fall back to manual host/port when needed</string>
     <string name="enum__lan_clipboard_endpoint_mode__manual" comment="Enum value label">Manual endpoint</string>
     <string name="enum__lan_clipboard_endpoint_mode__manual__description" comment="Enum value description">Always connect using the configured manual host and port</string>
+    <string name="enum__lan_clipboard_reliability_mode__mode_a_best_effort" comment="Enum value label">Mode A (best effort)</string>
+    <string name="enum__lan_clipboard_reliability_mode__mode_a_best_effort__description" comment="Enum value description">Lightweight mode. Connection may pause when FlorisBoard is not active.</string>
+    <string name="enum__lan_clipboard_reliability_mode__mode_b_always_on" comment="Enum value label">Mode B (always on)</string>
+    <string name="enum__lan_clipboard_reliability_mode__mode_b_always_on__description" comment="Enum value description">Recommended. Uses a persistent system notification to keep LAN clipboard sync seamless even in the background.</string>
 
     <string name="enum__color_representation__hex" comment="Enum value label">Hexadecimal</string>
     <string name="enum__color_representation__rgb" comment="Enum value label">Red Green Blue</string>
