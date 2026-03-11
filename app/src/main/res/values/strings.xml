@@ -134,6 +134,10 @@
     <string name="settings__localization__subtype_add_title" comment="Title of subtype dialog when adding a new subtype">Add subtype</string>
     <string name="settings__localization__language_pack_title" comment="Title of the language pack manager screen for managing installed and custom language packs">Manage installed language packs</string>
     <string name="settings__localization__language_pack_summary" comment="Summary of preference item for adding a new language pack">Experimental: manage extensions that add support for specific languages (shape-based Chinese input for now)</string>
+    <string name="settings__localization__import_system_locales_title" comment="Title of the action importing keyboard subtypes from Android system locale settings">Import languages from phone</string>
+    <string name="settings__localization__import_system_locales_summary" comment="Summary of the action importing keyboard subtypes from Android system locale settings">Adds subtype presets for languages currently enabled in Android language settings.</string>
+    <string name="settings__localization__import_system_locales_success" comment="Short toast shown when at least one language was imported from system locales">Imported languages from phone settings.</string>
+    <string name="settings__localization__import_system_locales_no_new_languages" comment="Short toast shown when all languages from system locales are already configured">No new phone languages to import.</string>
     <string name="settings__localization__subtype_edit_title" comment="Title of subtype dialog when editing an existing subtype">Edit subtype</string>
     <string name="settings__localization__subtype_locale" comment="Label for locale dropdown in subtype dialog">Primary language</string>
     <string name="settings__localization__subtype_popup_mapping" comment="Label for popup mapping dropdown in subtype screen">Popup mapping</string>

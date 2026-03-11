@@ -51,6 +51,7 @@ import dev.patrickgold.florisboard.lib.compose.FlorisScreenScope
 import dev.patrickgold.florisboard.lib.util.InputMethodUtils
 import dev.patrickgold.florisboard.lib.util.launchActivity
 import dev.patrickgold.florisboard.lib.util.launchUrl
+import dev.patrickgold.florisboard.subtypeManager
 import dev.patrickgold.jetpref.datastore.model.collectAsState
 import dev.patrickgold.jetpref.datastore.ui.PreferenceUiScope
 import kotlinx.coroutines.CoroutineScope
@@ -202,6 +203,7 @@ private fun PreferenceUiScope<FlorisPreferenceModel>.steps(
     requestNotification: ManagedActivityResultLauncher<String, Boolean>,
     scope: CoroutineScope,
 ): List<FlorisStep> {
+    val subtypeManager by context.subtypeManager()
 
     return listOfNotNull(
         FlorisStep(
@@ -240,6 +242,7 @@ private fun PreferenceUiScope<FlorisPreferenceModel>.steps(
             StepText(stringRes(R.string.setup__finish_up__description_p1))
             StepText(stringRes(R.string.setup__finish_up__description_p2))
             StepButton(label = stringRes(R.string.setup__finish_up__finish_btn)) {
+                subtypeManager.addSubtypePresetsForSystemLocales()
                 scope.launch { this@steps.prefs.internal.isImeSetUp.set(true) }
                 navController.navigate(Routes.Settings.Home) {
                     popUpTo(Routes.Setup.Screen) {

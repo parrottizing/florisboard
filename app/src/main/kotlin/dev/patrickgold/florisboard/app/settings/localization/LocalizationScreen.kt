@@ -53,6 +53,7 @@ import dev.patrickgold.jetpref.datastore.ui.PreferenceGroup
 import dev.patrickgold.jetpref.datastore.ui.SwitchPreference
 import dev.patrickgold.jetpref.material.ui.JetPrefAlertDialog
 import kotlinx.serialization.json.Json
+import org.florisboard.lib.android.showShortToastSync
 import org.florisboard.lib.compose.FlorisWarningCard
 import org.florisboard.lib.compose.stringRes
 
@@ -76,6 +77,8 @@ fun LocalizationScreen() = FlorisScreen {
     val context = LocalContext.current
     val keyboardManager by context.keyboardManager()
     val subtypeManager by context.subtypeManager()
+    val importSystemLocalesSuccessMsg = stringRes(R.string.settings__localization__import_system_locales_success)
+    val importSystemLocalesNoNewMsg = stringRes(R.string.settings__localization__import_system_locales_no_new_languages)
     var chosenSubtypeToDelete: Subtype? by rememberSaveable(saver = SubtypeSaver) { mutableStateOf(null) }
 
     floatingActionButton {
@@ -111,6 +114,19 @@ fun LocalizationScreen() = FlorisScreen {
             summary = stringRes(R.string.settings__localization__language_pack_summary),
             onClick = {
                 navController.navigate(Routes.Settings.LanguagePackManager(LanguagePackManagerScreenAction.MANAGE))
+            },
+        )
+        Preference(
+            title = stringRes(R.string.settings__localization__import_system_locales_title),
+            summary = stringRes(R.string.settings__localization__import_system_locales_summary),
+            onClick = {
+                val addedCount = subtypeManager.addSubtypePresetsForSystemLocales()
+                val message = if (addedCount > 0) {
+                    importSystemLocalesSuccessMsg
+                } else {
+                    importSystemLocalesNoNewMsg
+                }
+                context.showShortToastSync(message)
             },
         )
         PreferenceGroup(title = stringRes(R.string.settings__localization__group_subtypes__label)) {
