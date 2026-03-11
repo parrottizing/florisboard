@@ -3,6 +3,9 @@
 *.aab
 *.ap_
 
+# macOS metadata
+.DS_Store
+
 # dotenv
 .env
 
