@@ -253,12 +253,23 @@ class EditorInstance(context: Context) : AbstractEditorInstance(context) {
         val text = candidate.text.toString()
         if (text.isEmpty() || activeInfo.isRawInputEditor) return false
         val content = activeContent
+        val originalWordForRevert = content.composingText
+            .ifBlank { content.currentWordText }
+            .takeIf { it.isNotBlank() && it != text }
         return if (content.composing.isValid) {
-            phantomSpace.setActive(showComposingRegion = false, candidate = candidate)
+            phantomSpace.setActive(
+                showComposingRegion = false,
+                candidate = candidate,
+                revertWord = originalWordForRevert,
+            )
             super.finalizeComposingText(text)
         } else {
             val isPhantomSpaceActive = phantomSpace.determine(text)
-            phantomSpace.setActive(showComposingRegion = false, candidate = candidate)
+            phantomSpace.setActive(
+                showComposingRegion = false,
+                candidate = candidate,
+                revertWord = originalWordForRevert,
+            )
             return if (isPhantomSpaceActive) {
                 super.commitText("$SPACE$text")
             } else {
@@ -290,6 +301,52 @@ class EditorInstance(context: Context) : AbstractEditorInstance(context) {
             super.commitText(text)
         }.also {
             updateLastCommitPosition()
+        }
+    }
+
+    /**
+     * Reverts a previously auto-corrected word by replacing the corrected token at the cursor with the originally
+     * typed token. Returns true when a revert operation was applied.
+     */
+    fun revertPreviousAutoCorrection(): Boolean {
+        val candidateForRevert = phantomSpace.candidateForRevert ?: return false
+        val revertWord = phantomSpace.revertWord ?: return false
+        val correctedWord = candidateForRevert.text.toString()
+        if (correctedWord.isBlank() || revertWord.isBlank() || correctedWord == revertWord) {
+            return false
+        }
+
+        val content = activeContent
+        val localSelection = content.localSelection
+        if (localSelection.isNotValid || localSelection.isSelectionMode || activeInfo.isRawInputEditor) {
+            return false
+        }
+        val textBeforeSelection = content.textBeforeSelection
+        val hasTrailingSpace = textBeforeSelection.endsWith(SPACE)
+        val trailingCharsToDrop = if (hasTrailingSpace) 1 else 0
+        val replaceEndLocal = localSelection.start - trailingCharsToDrop
+        val replaceStartLocal = replaceEndLocal - correctedWord.length
+        if (replaceStartLocal < 0 || replaceEndLocal > textBeforeSelection.length || replaceStartLocal >= replaceEndLocal) {
+            return false
+        }
+        val correctedSlice = textBeforeSelection.substring(replaceStartLocal, replaceEndLocal)
+        if (correctedSlice != correctedWord) {
+            return false
+        }
+
+        val absoluteOffset = content.offset.takeIf { it > 0 } ?: 0
+        val replaceStart = replaceStartLocal + absoluteOffset
+        val replaceEnd = localSelection.start + absoluteOffset
+
+        massSelection.begin()
+        return try {
+            if (!setSelection(replaceStart, replaceEnd)) {
+                false
+            } else {
+                commitText(revertWord)
+            }
+        } finally {
+            massSelection.end()
         }
     }
 
@@ -600,6 +657,8 @@ class EditorInstance(context: Context) : AbstractEditorInstance(context) {
         private val state = AtomicInteger(0)
         var candidateForRevert: SuggestionCandidate? = null
             private set
+        var revertWord: String? = null
+            private set
 
         val isActive: Boolean
             get() = state.get() and F_IS_ACTIVE != 0
@@ -614,6 +673,7 @@ class EditorInstance(context: Context) : AbstractEditorInstance(context) {
             showComposingRegion: Boolean,
             stayActiveNextUpdate: Boolean = true,
             candidate: SuggestionCandidate? = null,
+            revertWord: String? = null,
         ) {
             state.set(
                 F_IS_ACTIVE
@@ -621,11 +681,13 @@ class EditorInstance(context: Context) : AbstractEditorInstance(context) {
                     or (if (stayActiveNextUpdate) F_STAY_ACTIVE_NEXT_UPDATE else 0)
             )
             candidateForRevert = candidate
+            this.revertWord = revertWord
         }
 
         fun setInactive() {
             state.set(0)
             candidateForRevert = null
+            revertWord = null
         }
 
         fun setInactiveFromUpdate() {
@@ -634,6 +696,7 @@ class EditorInstance(context: Context) : AbstractEditorInstance(context) {
             }
             if ((prevStateValue and F_STAY_ACTIVE_NEXT_UPDATE) == 0) {
                 candidateForRevert = null
+                revertWord = null
             }
         }
     }
