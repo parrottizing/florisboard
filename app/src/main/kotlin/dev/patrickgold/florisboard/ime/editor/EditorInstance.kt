@@ -239,6 +239,14 @@ class EditorInstance(context: Context) : AbstractEditorInstance(context) {
     }
 
     /**
+     * Commits [text] without clearing the last accepted-candidate metadata used for one-step backspace revert.
+     */
+    fun commitTextPreservingRevertMetadata(text: String): Boolean {
+        autoSpace.setInactive()
+        return super.commitText(text)
+    }
+
+    /**
      * Completes the given [candidate] in the current composing region. Does nothing if the current
      * input editor is not rich or if the input connection is invalid.
      *
@@ -253,10 +261,9 @@ class EditorInstance(context: Context) : AbstractEditorInstance(context) {
         val text = candidate.text.toString()
         if (text.isEmpty() || activeInfo.isRawInputEditor) return false
         val content = activeContent
-        val originalWordForRevert = content.composingText
-            .ifBlank { content.currentWordText }
-            .takeIf { it.isNotBlank() && it != text }
-        return if (content.composing.isValid) {
+        val originalWordForRevert = resolveOriginalWordForRevert(content, text)
+        val canFinalizeComposing = content.composing.isValid && isComposingAlignedForFinalize(content)
+        return if (canFinalizeComposing) {
             phantomSpace.setActive(
                 showComposingRegion = false,
                 candidate = candidate,
@@ -264,6 +271,15 @@ class EditorInstance(context: Context) : AbstractEditorInstance(context) {
             )
             super.finalizeComposingText(text)
         } else {
+            val replaced = tryCommitCompletionByReplacingWord(
+                candidate = candidate,
+                content = content,
+                text = text,
+                originalWordForRevert = originalWordForRevert,
+            )
+            if (replaced != null) {
+                return replaced
+            }
             val isPhantomSpaceActive = phantomSpace.determine(text)
             phantomSpace.setActive(
                 showComposingRegion = false,
@@ -278,6 +294,79 @@ class EditorInstance(context: Context) : AbstractEditorInstance(context) {
                 // handled in finalizeComposingText if content.composing.isValid
                 updateLastCommitPosition()
             }
+        }
+    }
+
+    private fun isComposingAlignedForFinalize(content: EditorContent): Boolean {
+        val composingText = content.composingText
+        return composingText.isNotEmpty() && content.textBeforeSelection.endsWith(composingText)
+    }
+
+    private fun resolveOriginalWordForRevert(content: EditorContent, correctedText: String): String? {
+        return content.composingText
+            .ifBlank { content.currentWordText }
+            .ifBlank { extractTokenBeforeCursor(content.textBeforeSelection) }
+            .takeIf { it.isNotBlank() && it != correctedText }
+    }
+
+    private fun extractTokenBeforeCursor(textBeforeSelection: String): String {
+        return textBeforeSelection
+            .takeLast(96)
+            .takeLastWhile { it.isLetter() || it == '\'' || it == '-' }
+            .trim()
+    }
+
+    private fun tryCommitCompletionByReplacingWord(
+        candidate: SuggestionCandidate,
+        content: EditorContent,
+        text: String,
+        originalWordForRevert: String?,
+    ): Boolean? {
+        val localSelection = content.localSelection
+        if (localSelection.isNotValid || localSelection.isSelectionMode) return null
+
+        val replaceEndLocal = localSelection.start
+        val replaceStartLocal: Int
+        val detectedWord: String
+        if (content.localCurrentWord.isValid && content.localCurrentWord.end == replaceEndLocal) {
+            replaceStartLocal = content.localCurrentWord.start
+            detectedWord = content.currentWordText
+        } else {
+            detectedWord = extractTokenBeforeCursor(content.textBeforeSelection)
+            if (detectedWord.isBlank()) return null
+            replaceStartLocal = replaceEndLocal - detectedWord.length
+        }
+        if (replaceStartLocal < 0 || replaceStartLocal >= replaceEndLocal) return null
+
+        val textBeforeSelection = content.textBeforeSelection
+        if (replaceEndLocal > textBeforeSelection.length) return null
+        val oldWordInEditor = textBeforeSelection.substring(replaceStartLocal, replaceEndLocal)
+        if (oldWordInEditor.isBlank()) return null
+
+        val absoluteOffset = content.offset.takeIf { it > 0 } ?: 0
+        val replaceStart = replaceStartLocal + absoluteOffset
+        val replaceEnd = replaceEndLocal + absoluteOffset
+        val revertWord = originalWordForRevert
+            ?: oldWordInEditor.takeIf { it.isNotBlank() && it != text }
+
+        massSelection.begin()
+        return try {
+            if (!setSelection(replaceStart, replaceEnd)) {
+                false
+            } else {
+                phantomSpace.setActive(
+                    showComposingRegion = false,
+                    candidate = candidate,
+                    revertWord = revertWord,
+                )
+                commitTextPreservingRevertMetadata(text).also { committed ->
+                    if (committed) {
+                        updateLastCommitPosition()
+                    }
+                }
+            }
+        } finally {
+            massSelection.end()
         }
     }
 
@@ -691,12 +780,8 @@ class EditorInstance(context: Context) : AbstractEditorInstance(context) {
         }
 
         fun setInactiveFromUpdate() {
-            val prevStateValue = state.getAndUpdate { state ->
+            state.getAndUpdate { state ->
                 if ((state and F_STAY_ACTIVE_NEXT_UPDATE) != 0) (state and F_STAY_ACTIVE_NEXT_UPDATE.inv()) else 0
-            }
-            if ((prevStateValue and F_STAY_ACTIVE_NEXT_UPDATE) == 0) {
-                candidateForRevert = null
-                revertWord = null
             }
         }
     }

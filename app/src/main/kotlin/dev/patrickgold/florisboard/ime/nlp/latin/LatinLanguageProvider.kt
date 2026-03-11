@@ -67,6 +67,7 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
             "thats" to "that's",
             "theres" to "there's",
             "whats" to "what's",
+            "lets" to "let's",
         )
     }
 
