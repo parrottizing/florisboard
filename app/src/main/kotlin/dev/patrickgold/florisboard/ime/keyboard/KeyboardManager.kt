@@ -397,17 +397,20 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
         }
     }
 
-    private fun revertPreviouslyAcceptedCandidate() {
-        editorInstance.phantomSpace.candidateForRevert?.let { candidateForRevert ->
-            candidateForRevert.sourceProvider?.let { sourceProvider ->
-                scope.launch {
-                    sourceProvider.notifySuggestionReverted(
-                        subtype = subtypeManager.activeSubtype,
-                        candidate = candidateForRevert,
-                    )
-                }
+    private fun revertPreviouslyAcceptedCandidate(): Boolean {
+        val candidateForRevert = editorInstance.phantomSpace.candidateForRevert ?: return false
+        val didRevert = editorInstance.revertPreviousAutoCorrection()
+        if (!didRevert) return false
+
+        candidateForRevert.sourceProvider?.let { sourceProvider ->
+            scope.launch {
+                sourceProvider.notifySuggestionReverted(
+                    subtype = subtypeManager.activeSubtype,
+                    candidate = candidateForRevert,
+                )
             }
         }
+        return true
     }
 
     /**
@@ -422,7 +425,9 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
             it.isManualSelectionModeStart = false
             it.isManualSelectionModeEnd = false
         }
-        revertPreviouslyAcceptedCandidate()
+        if (revertPreviouslyAcceptedCandidate()) {
+            return
+        }
         editorInstance.deleteBackwards(unit)
     }
 
@@ -435,7 +440,6 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
             it.isManualSelectionModeStart = false
             it.isManualSelectionModeEnd = false
         }
-        revertPreviouslyAcceptedCandidate()
         editorInstance.deleteForwards(unit)
     }
 
