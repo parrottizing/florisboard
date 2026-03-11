@@ -16,7 +16,9 @@
 
 package dev.patrickgold.florisboard.ime.core
 
+import android.app.LocaleManager
 import android.content.Context
+import android.content.res.Resources
 import dev.patrickgold.florisboard.app.FlorisPreferenceStore
 import dev.patrickgold.florisboard.ime.keyboard.CurrencySet
 import dev.patrickgold.florisboard.keyboardManager
@@ -28,6 +30,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import org.florisboard.lib.android.AndroidVersion
 import org.florisboard.lib.kotlin.collectLatestIn
 
 val SubtypeJsonConfig = Json {
@@ -43,6 +46,7 @@ val SubtypeJsonConfig = Json {
 class SubtypeManager(context: Context) {
     private val prefs by FlorisPreferenceStore
     private val keyboardManager by context.keyboardManager()
+    private val appContext = context.applicationContext
     private val scope = CoroutineScope(Dispatchers.Default)
 
     val subtypesFlow: StateFlow<List<Subtype>>
@@ -107,6 +111,61 @@ class SubtypeManager(context: Context) {
         val newSubtypeList = subtypeList + subtypeToAdd
         persistNewSubtypeList(newSubtypeList)
         return true
+    }
+
+    /**
+     * Adds subtype presets for currently configured system locales.
+     *
+     * @return Number of newly added subtypes.
+     */
+    fun addSubtypePresetsForSystemLocales(): Int {
+        val localeList = if (AndroidVersion.ATLEAST_API33_T) {
+            appContext.getSystemService(LocaleManager::class.java)?.systemLocales
+                ?: Resources.getSystem().configuration.locales
+        } else {
+            Resources.getSystem().configuration.locales
+        }
+        val systemLocales = buildList {
+            for (index in 0 until localeList.size()) {
+                add(FlorisLocale.from(localeList.get(index)))
+            }
+        }
+        return addSubtypePresetsForLocales(systemLocales)
+    }
+
+    /**
+     * Adds subtype presets for the given [locales], skipping duplicates.
+     *
+     * @return Number of newly added subtypes.
+     */
+    fun addSubtypePresetsForLocales(locales: List<FlorisLocale>): Int {
+        if (locales.isEmpty()) {
+            return 0
+        }
+
+        val subtypeList = subtypes.toMutableList()
+        var subtypeId = System.currentTimeMillis()
+        var addedCount = 0
+
+        for (locale in locales.distinct()) {
+            val preset = getSubtypePresetForLocale(locale) ?: continue
+            val subtype = preset.toSubtype()
+            if (subtypeList.any { it.equalsExcludingId(subtype) }) {
+                continue
+            }
+            while (subtypeList.any { it.id == subtypeId }) {
+                subtypeId += 1
+            }
+            subtypeList.add(subtype.copy(id = subtypeId))
+            subtypeId += 1
+            addedCount += 1
+        }
+
+        if (addedCount > 0) {
+            persistNewSubtypeList(subtypeList)
+        }
+
+        return addedCount
     }
 
     /**
