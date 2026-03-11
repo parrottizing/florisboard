@@ -97,6 +97,38 @@ class LatinLanguageProviderInstrumentedTest {
     }
 
     @Test
+    fun suggestPromotesLetsToContraction() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val provider = LatinLanguageProvider(context)
+        provider.create()
+        provider.preload(Subtype.DEFAULT)
+
+        val content = EditorContent(
+            text = "lets",
+            offset = 0,
+            localSelection = EditorRange(4, 4),
+            localComposing = EditorRange(0, 4),
+            localCurrentWord = EditorRange(0, 4),
+        )
+        val suggestions = provider.suggest(
+            subtype = Subtype.DEFAULT,
+            content = content,
+            maxCandidateCount = 6,
+            allowPossiblyOffensive = true,
+            isPrivateSession = false,
+        )
+
+        assertTrue(
+            "Expected \"let's\" to be suggested for input \"lets\"",
+            suggestions.any { it.text.toString() == "let's" },
+        )
+        assertTrue(
+            "Expected \"let's\" suggestion to be eligible for auto-commit",
+            suggestions.any { it.text.toString() == "let's" && it.isEligibleForAutoCommit },
+        )
+    }
+
+    @Test
     fun suggestDoesNotLeakLatinSuggestionsForCyrillicInput() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val provider = LatinLanguageProvider(context)

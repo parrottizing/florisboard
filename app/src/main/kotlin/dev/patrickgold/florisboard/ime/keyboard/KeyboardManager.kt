@@ -544,7 +544,11 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
         // TODO: this is whether we commit space after selecting candidate. Should be determined by SuggestionProvider
         if (!subtypeManager.activeSubtype.primaryLocale.supportsAutoSpace &&
                 candidate != null) { /* Do nothing */ } else {
-            editorInstance.commitText(KeyCode.SPACE.toChar().toString())
+            if (candidate != null) {
+                editorInstance.commitTextPreservingRevertMetadata(KeyCode.SPACE.toChar().toString())
+            } else {
+                editorInstance.commitText(KeyCode.SPACE.toChar().toString())
+            }
         }
     }
 
@@ -578,7 +582,11 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
         // TODO: this is whether we commit space after selecting candidate. Should be determined by SuggestionProvider
         if (!subtypeManager.activeSubtype.primaryLocale.supportsAutoSpace &&
                 candidate != null) { /* Do nothing */ } else {
-            editorInstance.commitText(KeyCode.SPACE.toChar().toString())
+            if (candidate != null) {
+                editorInstance.commitTextPreservingRevertMetadata(KeyCode.SPACE.toChar().toString())
+            } else {
+                editorInstance.commitText(KeyCode.SPACE.toChar().toString())
+            }
         }
     }
 
