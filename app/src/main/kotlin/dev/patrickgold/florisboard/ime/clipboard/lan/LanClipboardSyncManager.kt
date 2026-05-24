@@ -184,19 +184,27 @@ class LanClipboardSyncManager(
         }
         registerRuntimeObservers()
         lifecycleJob = scope.launch {
+            val authFlow = combine(
+                prefs.clipboard.lanSyncToken.asFlow(),
+                prefs.clipboard.lanSyncServiceId.asFlow(),
+            ) { token, serviceId ->
+                token to serviceId
+            }
             combine(
                 prefs.clipboard.lanSyncEnabled.asFlow(),
                 prefs.clipboard.lanSyncEndpointMode.asFlow(),
                 prefs.clipboard.lanSyncHost.asFlow(),
                 prefs.clipboard.lanSyncPort.asFlow(),
-                prefs.clipboard.lanSyncToken.asFlow(),
-            ) { isEnabled, endpointMode, host, port, token ->
+                authFlow,
+            ) { isEnabled, endpointMode, host, port, auth ->
+                val (token, serviceId) = auth
                 LanRuntimeConfig(
                     isEnabled = isEnabled,
                     endpointMode = endpointMode,
                     host = host.trim(),
                     port = port.coerceIn(1, 65535),
                     token = token.trim(),
+                    preferredServiceId = serviceId.trim(),
                     autoReconnect = true,
                     networkAvailable = true,
                     reconnectGeneration = 0L,
@@ -301,7 +309,7 @@ class LanClipboardSyncManager(
                 endpoint = endpoint,
             )
 
-            val sessionResult = connectAndRun(endpoint, config.token)
+            val sessionResult = connectAndRun(endpoint, config)
             if (!config.autoReconnect || !sessionResult.retryable) {
                 _connectionStatusFlow.value = LanClipboardConnectionStatus(
                     state = LanClipboardConnectionState.ERROR,
@@ -324,25 +332,16 @@ class LanClipboardSyncManager(
     }
 
     private fun selectEndpoint(config: LanRuntimeConfig): LanClipboardEndpoint? {
-        val manualEndpoint = config.host
-            .takeIf { it.isNotBlank() }
-            ?.let { host ->
-                LanClipboardEndpoint(
-                    host = host,
-                    port = config.port,
-                    path = LAN_CLIPBOARD_DEFAULT_PATH,
-                    isManual = true,
-                )
-            }
-        return when (config.endpointMode) {
-            LanClipboardEndpointMode.MANUAL -> manualEndpoint
-            LanClipboardEndpointMode.AUTO_DISCOVERY -> {
-                discovery.endpointsFlow.value.firstOrNull() ?: manualEndpoint
-            }
-        }
+        return selectLanClipboardEndpoint(
+            endpointMode = config.endpointMode,
+            host = config.host,
+            port = config.port,
+            preferredServiceId = config.preferredServiceId,
+            discoveredEndpoints = discovery.endpointsFlow.value,
+        )
     }
 
-    private suspend fun connectAndRun(endpoint: LanClipboardEndpoint, token: String): SessionResult {
+    private suspend fun connectAndRun(endpoint: LanClipboardEndpoint, config: LanRuntimeConfig): SessionResult {
         return suspendCancellableCoroutine { continuation ->
             val isCompleted = AtomicBoolean(false)
             val lastPongAt = AtomicLong(System.currentTimeMillis())
@@ -360,7 +359,7 @@ class LanClipboardSyncManager(
             val request = runCatching {
                 Request.Builder()
                     .url(endpoint.websocketUrl())
-                    .header("Authorization", "Bearer $token")
+                    .header("Authorization", "Bearer ${config.token}")
                     .header("X-Clipboard-Protocol-Version", LAN_CLIPBOARD_PROTOCOL_VERSION)
                     .header("X-Clipboard-Device-Id", deviceId)
                     .header("X-Clipboard-Source", LAN_CLIPBOARD_SOURCE_ANDROID)
@@ -379,6 +378,15 @@ class LanClipboardSyncManager(
                         state = LanClipboardConnectionState.CONNECTED,
                         endpoint = endpoint,
                     )
+                    val preferredServiceIdUpdate = preferredLanClipboardServiceIdUpdate(
+                        connectedEndpoint = endpoint,
+                        currentPreferredServiceId = config.preferredServiceId,
+                    )
+                    if (preferredServiceIdUpdate != null) {
+                        scope.launch {
+                            prefs.clipboard.lanSyncServiceId.set(preferredServiceIdUpdate)
+                        }
+                    }
                     val didFlushPending = flushPendingOutboundEvent(webSocket)
                     if (!didFlushPending) {
                         complete(SessionResult.retryable("Failed to send pending clipboard event"))
@@ -1421,6 +1429,7 @@ private data class LanRuntimeConfig(
     val host: String,
     val port: Int,
     val token: String,
+    val preferredServiceId: String,
     val autoReconnect: Boolean,
     val networkAvailable: Boolean,
     val reconnectGeneration: Long,

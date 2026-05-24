@@ -177,6 +177,10 @@ abstract class FlorisPreferenceModel : PreferenceModel() {
             key = "clipboard__lan_sync_token",
             default = "",
         )
+        val lanSyncServiceId = string(
+            key = "clipboard__lan_sync_service_id",
+            default = "",
+        )
         val lanSyncAutoReconnect = boolean(
             key = "clipboard__lan_sync_auto_reconnect",
             default = true,

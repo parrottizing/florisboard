@@ -62,6 +62,7 @@ data class LanClipboardPairingCredentials(
     val host: String,
     val port: Int,
     val websocketPath: String,
+    val serviceId: String,
 )
 
 fun parseLanClipboardPairingOffer(uri: Uri): LanClipboardPairingOffer? {
@@ -129,30 +130,7 @@ suspend fun redeemLanClipboardPairingOffer(
             }
 
             val responseBody = response.body.string()
-            val payload = pairingJson.parseToJsonElement(responseBody).jsonObject
-
-            val token = payload["token"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-            if (token.isBlank()) {
-                throw IllegalStateException("Pairing response is missing token")
-            }
-
-            val host = sanitizePairingHost(
-                payload["host"]?.jsonPrimitive?.contentOrNull ?: offer.host,
-            )
-                .ifBlank { offer.host }
-            val port = payload["port"]?.jsonPrimitive?.intOrNull
-                ?.takeIf { it in 1..65535 }
-                ?: offer.port
-            val websocketPath = normalizeWebsocketPath(
-                payload["ws_path"]?.jsonPrimitive?.contentOrNull,
-            )
-
-            LanClipboardPairingCredentials(
-                token = token,
-                host = host,
-                port = port,
-                websocketPath = websocketPath,
-            )
+            parseLanClipboardPairingCredentialsResponse(responseBody, offer)
         }
     }
 }
@@ -209,4 +187,36 @@ internal fun normalizeWebsocketPath(path: String?): String {
         return LAN_CLIPBOARD_DEFAULT_PATH
     }
     return if (normalized.startsWith('/')) normalized else "/$normalized"
+}
+
+internal fun parseLanClipboardPairingCredentialsResponse(
+    responseBody: String,
+    offer: LanClipboardPairingOffer,
+): LanClipboardPairingCredentials {
+    val payload = pairingJson.parseToJsonElement(responseBody).jsonObject
+
+    val token = payload["token"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+    if (token.isBlank()) {
+        throw IllegalStateException("Pairing response is missing token")
+    }
+
+    val host = sanitizePairingHost(
+        payload["host"]?.jsonPrimitive?.contentOrNull ?: offer.host,
+    )
+        .ifBlank { offer.host }
+    val port = payload["port"]?.jsonPrimitive?.intOrNull
+        ?.takeIf { it in 1..65535 }
+        ?: offer.port
+    val websocketPath = normalizeWebsocketPath(
+        payload["ws_path"]?.jsonPrimitive?.contentOrNull,
+    )
+    val serviceId = payload["service_id"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+
+    return LanClipboardPairingCredentials(
+        token = token,
+        host = host,
+        port = port,
+        websocketPath = websocketPath,
+        serviceId = serviceId,
+    )
 }
