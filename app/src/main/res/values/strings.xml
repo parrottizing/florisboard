@@ -763,6 +763,7 @@
     <string name="pref__clipboard__lan_sync_status__connecting">Connecting to {endpoint}…</string>
     <string name="pref__clipboard__lan_sync_status__connected">Connected to {endpoint}</string>
     <string name="pref__clipboard__lan_sync_status__reconnecting">Reconnecting (attempt {attempt})…</string>
+    <string name="pref__clipboard__lan_sync_status__reconnecting_with_reason">Reconnecting (attempt {attempt}): {reason}</string>
     <string name="pref__clipboard__lan_sync_status__error">Connection error</string>
     <string name="pref__clipboard__lan_sync_manual_reconnect__label">Reconnect now</string>
     <string name="pref__clipboard__lan_sync_manual_reconnect__summary">Force a fresh connection attempt</string>

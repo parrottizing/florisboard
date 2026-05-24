@@ -16,14 +16,21 @@
 
 package dev.patrickgold.florisboard.app.settings.clipboard
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState as collectAsStateFlow
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.core.content.ContextCompat
 import androidx.compose.ui.platform.LocalContext
 import dev.patrickgold.florisboard.lanClipboardSyncManager
 import dev.patrickgold.florisboard.R
@@ -75,6 +82,32 @@ fun ClipboardScreen() = FlorisScreen {
         var portDraft by rememberSaveable { mutableStateOf(lanSyncPort.toString()) }
         var tokenDraft by rememberSaveable { mutableStateOf(lanSyncToken) }
         var portValidationError by rememberSaveable { mutableStateOf(false) }
+        var nearbyWifiPermissionGranted by rememberSaveable {
+            mutableStateOf(hasLanNearbyWifiDevicesPermission(context))
+        }
+        var nearbyWifiPermissionRequestInFlight by rememberSaveable { mutableStateOf(false) }
+
+        val requestNearbyWifiDevicesPermission =
+            rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
+                nearbyWifiPermissionGranted = isGranted || hasLanNearbyWifiDevicesPermission(context)
+                nearbyWifiPermissionRequestInFlight = false
+                if (!nearbyWifiPermissionGranted && lanSyncEnabled) {
+                    scope.launch {
+                        prefs.clipboard.lanSyncEnabled.set(false)
+                    }
+                }
+            }
+
+        LaunchedEffect(lanSyncEnabled, nearbyWifiPermissionGranted, nearbyWifiPermissionRequestInFlight) {
+            if (!lanSyncEnabled || nearbyWifiPermissionGranted || nearbyWifiPermissionRequestInFlight) {
+                return@LaunchedEffect
+            }
+            if (!requiresLanNearbyWifiDevicesPermission()) {
+                return@LaunchedEffect
+            }
+            nearbyWifiPermissionRequestInFlight = true
+            requestNearbyWifiDevicesPermission.launch(Manifest.permission.NEARBY_WIFI_DEVICES)
+        }
 
         SwitchPreference(
             prefs.clipboard.useInternalClipboard,
@@ -283,8 +316,13 @@ fun ClipboardScreen() = FlorisScreen {
                             ?: stringRes(R.string.general__unknown))
                     )
                     LanClipboardConnectionState.RECONNECTING -> stringRes(
-                        R.string.pref__clipboard__lan_sync_status__reconnecting,
+                        if (lanConnectionStatus.message.isNullOrBlank()) {
+                            R.string.pref__clipboard__lan_sync_status__reconnecting
+                        } else {
+                            R.string.pref__clipboard__lan_sync_status__reconnecting_with_reason
+                        },
                         "attempt" to lanConnectionStatus.retryAttempt,
+                        "reason" to (lanConnectionStatus.message ?: ""),
                     )
                     LanClipboardConnectionState.ERROR -> lanConnectionStatus.message
                         ?: stringRes(R.string.pref__clipboard__lan_sync_status__error)
@@ -390,4 +428,18 @@ fun ClipboardScreen() = FlorisScreen {
             }
         }
     }
+}
+
+private fun requiresLanNearbyWifiDevicesPermission(): Boolean {
+    return AndroidVersion.ATLEAST_API33_T
+}
+
+private fun hasLanNearbyWifiDevicesPermission(context: Context): Boolean {
+    if (!requiresLanNearbyWifiDevicesPermission()) {
+        return true
+    }
+    return ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.NEARBY_WIFI_DEVICES,
+    ) == PackageManager.PERMISSION_GRANTED
 }

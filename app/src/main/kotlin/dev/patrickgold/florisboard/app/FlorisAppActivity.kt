@@ -253,6 +253,7 @@ class FlorisAppActivity : ComponentActivity() {
                 prefs.clipboard.lanSyncHost.set(credentials.host)
                 prefs.clipboard.lanSyncPort.set(credentials.port)
                 prefs.clipboard.lanSyncToken.set(credentials.token)
+                prefs.clipboard.lanSyncServiceId.set(credentials.serviceId)
                 prefs.clipboard.lanSyncEndpointMode.set(LanClipboardEndpointMode.AUTO_DISCOVERY)
                 prefs.clipboard.lanSyncEnabled.set(true)
                 lanClipboardSyncManager.requestManualReconnect()
