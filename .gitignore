@@ -8,6 +8,11 @@
 
 # dotenv
 .env
+.env.*
+!.env.example
+.gumlet_clipboard_bridge/
+state.json
+pairing_qr.png
 
 # Files for the ART/Dalvik VM
 *.dex
@@ -37,6 +42,7 @@ proguard/
 
 # Log Files
 *.log
+*.log.*
 
 # Android Studio Navigation editor temp files
 .navigation/
@@ -51,6 +57,11 @@ captures/
 
 # Keystore files
 *.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
 crowdin.properties
 
 # C++
